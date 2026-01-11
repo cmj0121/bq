@@ -8,12 +8,18 @@ all: $(SUBDIR) 		# default action
 
 clean: $(SUBDIR)	# clean-up environment
 	@find . -name '*.sw[po]' -delete
+	rm -rf bin/
 
 test:				# run test
+	go test -v ./...
 
 run:				# run in the local environment
+	go run cmd/bq/main.go
 
 build:				# build the binary/library
+	go mod tidy
+	gofmt -s -w .
+	go build -o bin/bq cmd/bq/main.go
 
 upgrade:			# upgrade all the necessary packages
 	pre-commit autoupdate
