@@ -740,6 +740,15 @@ func TestInferTypeInfo(t *testing.T) {
 		{int64(0), 'q', "int64"},
 		{uint64(0), 'Q', "uint64"},
 		{"string", '?', "unknown"},
+		// Array types
+		{[]int8{}, 'b', "[]int8"},
+		{[]uint8{}, 'B', "[]uint8"},
+		{[]int16{}, 'h', "[]int16"},
+		{[]uint16{}, 'H', "[]uint16"},
+		{[]int32{}, 'i', "[]int32"},
+		{[]uint32{}, 'I', "[]uint32"},
+		{[]int64{}, 'q', "[]int64"},
+		{[]uint64{}, 'Q', "[]uint64"},
 	}
 
 	for _, tt := range tests {
@@ -750,6 +759,320 @@ func TestInferTypeInfo(t *testing.T) {
 			}
 			if typeName != tt.wantType {
 				t.Errorf("inferTypeInfo() type = %s, want %s", typeName, tt.wantType)
+			}
+		})
+	}
+}
+
+func TestParseWithArrayCount(t *testing.T) {
+	tests := []struct {
+		name      string
+		format    string
+		wantCount []int
+		wantCodes []rune
+		wantErr   bool
+	}{
+		{
+			name:      "single array",
+			format:    "4B",
+			wantCount: []int{4},
+			wantCodes: []rune{'B'},
+		},
+		{
+			name:      "mixed single and array",
+			format:    "<b4Bh",
+			wantCount: []int{1, 4, 1},
+			wantCodes: []rune{'b', 'B', 'h'},
+		},
+		{
+			name:      "multiple arrays",
+			format:    "2h3i",
+			wantCount: []int{2, 3},
+			wantCodes: []rune{'h', 'i'},
+		},
+		{
+			name:      "large count",
+			format:    "100B",
+			wantCount: []int{100},
+			wantCodes: []rune{'B'},
+		},
+		{
+			name:    "zero count",
+			format:  "0B",
+			wantErr: true,
+		},
+		{
+			name:    "count without format",
+			format:  "4",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			expr, err := Parse(tt.format)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Parse() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr {
+				return
+			}
+
+			if len(expr.Formats) != len(tt.wantCodes) {
+				t.Errorf("Parse() formats len = %d, want %d", len(expr.Formats), len(tt.wantCodes))
+				return
+			}
+
+			for i, fc := range expr.Formats {
+				if fc.Code != tt.wantCodes[i] {
+					t.Errorf("Parse() Formats[%d].Code = %c, want %c", i, fc.Code, tt.wantCodes[i])
+				}
+				if fc.Count != tt.wantCount[i] {
+					t.Errorf("Parse() Formats[%d].Count = %d, want %d", i, fc.Count, tt.wantCount[i])
+				}
+			}
+		})
+	}
+}
+
+func TestExpr_ReadArray(t *testing.T) {
+	tests := []struct {
+		name    string
+		format  string
+		data    []byte
+		want    []any
+		wantErr bool
+	}{
+		{
+			name:   "4 unsigned chars",
+			format: "<4B",
+			data:   []byte{0x01, 0x02, 0x03, 0x04},
+			want:   []any{[]uint8{1, 2, 3, 4}},
+		},
+		{
+			name:   "2 signed shorts little endian",
+			format: "<2h",
+			data:   []byte{0x01, 0x00, 0xFF, 0xFF},
+			want:   []any{[]int16{1, -1}},
+		},
+		{
+			name:   "2 unsigned shorts big endian",
+			format: ">2H",
+			data:   []byte{0x00, 0x01, 0x00, 0x02},
+			want:   []any{[]uint16{1, 2}},
+		},
+		{
+			name:   "mixed single and array",
+			format: "<b4B",
+			data:   []byte{0xFF, 0x01, 0x02, 0x03, 0x04},
+			want:   []any{int8(-1), []uint8{1, 2, 3, 4}},
+		},
+		{
+			name:   "2 signed ints",
+			format: "<2i",
+			data:   []byte{0x01, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF},
+			want:   []any{[]int32{1, -1}},
+		},
+		{
+			name:   "2 signed longs",
+			format: "<2q",
+			data:   []byte{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
+			want:   []any{[]int64{1, -1}},
+		},
+		{
+			name:    "insufficient data for array",
+			format:  "<4i",
+			data:    []byte{0x01, 0x02, 0x03, 0x04},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			expr, err := Parse(tt.format)
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+
+			got, err := expr.Read(bytes.NewReader(tt.data))
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Read() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr {
+				return
+			}
+
+			if len(got) != len(tt.want) {
+				t.Errorf("Read() len = %v, want %v", len(got), len(tt.want))
+				return
+			}
+
+			for i := range got {
+				if !compareValues(got[i], tt.want[i]) {
+					t.Errorf("Read() [%d] = %v (%T), want %v (%T)", i, got[i], got[i], tt.want[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+// compareValues compares two values, handling slices specially.
+func compareValues(a, b any) bool {
+	switch av := a.(type) {
+	case []int8:
+		bv, ok := b.([]int8)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if av[i] != bv[i] {
+				return false
+			}
+		}
+		return true
+	case []uint8:
+		bv, ok := b.([]uint8)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if av[i] != bv[i] {
+				return false
+			}
+		}
+		return true
+	case []int16:
+		bv, ok := b.([]int16)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if av[i] != bv[i] {
+				return false
+			}
+		}
+		return true
+	case []uint16:
+		bv, ok := b.([]uint16)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if av[i] != bv[i] {
+				return false
+			}
+		}
+		return true
+	case []int32:
+		bv, ok := b.([]int32)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if av[i] != bv[i] {
+				return false
+			}
+		}
+		return true
+	case []uint32:
+		bv, ok := b.([]uint32)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if av[i] != bv[i] {
+				return false
+			}
+		}
+		return true
+	case []int64:
+		bv, ok := b.([]int64)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if av[i] != bv[i] {
+				return false
+			}
+		}
+		return true
+	case []uint64:
+		bv, ok := b.([]uint64)
+		if !ok || len(av) != len(bv) {
+			return false
+		}
+		for i := range av {
+			if av[i] != bv[i] {
+				return false
+			}
+		}
+		return true
+	default:
+		return a == b
+	}
+}
+
+func TestFormatHexArray(t *testing.T) {
+	tests := []struct {
+		name string
+		val  any
+		want string
+	}{
+		{"[]uint8", []uint8{0x01, 0x02, 0x03}, "[01 02 03]"},
+		{"[]int8", []int8{-1, 0, 1}, "[ff 00 01]"},
+		{"[]uint16", []uint16{0x0102, 0x0304}, "[0102 0304]"},
+		{"[]int16", []int16{-1, 1}, "[ffff 0001]"},
+		{"[]uint32", []uint32{0x01020304}, "[01020304]"},
+		{"[]int32", []int32{-1}, "[ffffffff]"},
+		{"[]uint64", []uint64{0x0102030405060708}, "[0102030405060708]"},
+		{"[]int64", []int64{-1}, "[ffffffffffffffff]"},
+		{"empty []uint8", []uint8{}, "[]"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatHex(tt.val)
+			if got != tt.want {
+				t.Errorf("formatHex() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseExpressionWithArray(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{
+			name:    "simple array",
+			input:   "4B",
+			wantErr: false,
+		},
+		{
+			name:    "mixed with pipe",
+			input:   "b4B | {0 -> header, 1 -> data}",
+			wantErr: false,
+		},
+		{
+			name:    "array with byte order",
+			input:   "<2H",
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, err := ParseExpression(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseExpression() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && node == nil {
+				t.Errorf("ParseExpression() returned nil node without error")
 			}
 		})
 	}
