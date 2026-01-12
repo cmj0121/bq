@@ -101,10 +101,12 @@ const (
 	TokenPipe                    // |
 	TokenLBrace                  // {
 	TokenRBrace                  // }
+	TokenLParen                  // (
+	TokenRParen                  // )
 	TokenArrow                   // ->
 	TokenComma                   // ,
 	TokenNumber                  // integer literal (for index)
-	TokenIdent                   // identifier (for field name)
+	TokenIdent                   // identifier (for field name or function)
 	TokenFormat                  // format code (b, B, h, H, i, I, q, Q)
 	TokenOrder                   // byte order prefix (<, >, @)
 )
@@ -152,6 +154,12 @@ func (t *Tokenizer) Next() (Token, error) {
 	case '}':
 		t.pos++
 		return Token{Type: TokenRBrace, Value: "}", Pos: startPos}, nil
+	case '(':
+		t.pos++
+		return Token{Type: TokenLParen, Value: "(", Pos: startPos}, nil
+	case ')':
+		t.pos++
+		return Token{Type: TokenRParen, Value: ")", Pos: startPos}, nil
 	case ',':
 		t.pos++
 		return Token{Type: TokenComma, Value: ",", Pos: startPos}, nil
@@ -264,8 +272,9 @@ func NewParser(input string) *Parser {
 //
 //	Expression  → Pipe
 //	Pipe        → Primary ('|' Object)?
-//	Primary     → FormatExpr
-//	FormatExpr  → ByteOrder? FormatCodes
+//	Primary     → FunctionCall | FormatExpr
+//	FunctionCall→ IDENT '(' FormatExpr ')'
+//	FormatExpr  → ByteOrder? (Count? FormatCode)+
 //	Object      → '{' FieldList '}'
 //	FieldList   → FieldDef (',' FieldDef)*
 //	FieldDef    → NUMBER '->' IDENTIFIER
@@ -316,9 +325,60 @@ func (p *Parser) parsePipe() (Node, error) {
 	return left, nil
 }
 
-// parsePrimary parses: FormatExpr
+// parsePrimary parses: FunctionCall | FormatExpr
 func (p *Parser) parsePrimary() (Node, error) {
+	// Check for function call: IDENT '(' ... ')'
+	if p.current.Type == TokenIdent {
+		// Peek ahead to see if next token is '('
+		nextTok, err := p.tokenizer.Peek()
+		if err != nil {
+			return nil, err
+		}
+		if nextTok.Type == TokenLParen {
+			return p.parseFunctionCall()
+		}
+	}
 	return p.parseFormatExpr()
+}
+
+// parseFunctionCall parses: IDENT '(' FormatExpr ')'
+// Currently only supports the 'parse' function.
+func (p *Parser) parseFunctionCall() (Node, error) {
+	funcName := p.current.Value
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+
+	// Consume '('
+	if p.current.Type != TokenLParen {
+		return nil, fmt.Errorf("expected '(' after function name at position %d", p.current.Pos)
+	}
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+
+	// Parse the argument (format expression)
+	arg, err := p.parseFormatExpr()
+	if err != nil {
+		return nil, err
+	}
+
+	// Consume ')'
+	if p.current.Type != TokenRParen {
+		return nil, fmt.Errorf("expected ')' after function argument at position %d", p.current.Pos)
+	}
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+
+	// Handle known functions
+	switch funcName {
+	case "parse":
+		// parse() just returns the format expression as-is
+		return arg, nil
+	default:
+		return nil, fmt.Errorf("unknown function %q at position %d", funcName, p.current.Pos)
+	}
 }
 
 // parseFormatExpr parses: ByteOrder? (Count? FormatCode)+

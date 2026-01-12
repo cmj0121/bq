@@ -89,6 +89,24 @@ Name       Code   Type                    Value                  Hex
 0          B      uint8                                [01 02 03 04]
 ```
 
+### Functions
+
+#### parse()
+
+The `parse()` function provides explicit parsing syntax:
+
+```text
+parse(<format_codes>)
+```
+
+This is equivalent to using format codes directly, but provides a more explicit syntax:
+
+```bash
+# These are equivalent:
+printf '\xff\x01\x02' | bq '<bH' -p
+printf '\xff\x01\x02' | bq 'parse(<bH)' -p
+```
+
 ### Pipe Operator
 
 The pipe operator `|` passes parsed values to subsequent operations:
@@ -142,7 +160,7 @@ chunk_length i    int32               218103808           0x0d000000
 
 ## Roadmap
 
-- [ ] `parse(...)` function for explicit parsing
+- [x] `parse(...)` function for explicit parsing
 - [ ] Nested objects: `{0 -> a, {1 -> b, 2 -> c}}`
 - [ ] Write/modify binary data
 - [ ] String type support (`s`)

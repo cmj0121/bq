@@ -374,6 +374,19 @@ func TestTokenizer(t *testing.T) {
 				{Type: TokenEOF},
 			},
 		},
+		{
+			name:  "function call with parentheses",
+			input: "parse(<bH)",
+			tokens: []Token{
+				{Type: TokenIdent, Value: "parse"},
+				{Type: TokenLParen, Value: "("},
+				{Type: TokenOrder, Value: "<"},
+				{Type: TokenFormat, Value: "b"},
+				{Type: TokenFormat, Value: "H"},
+				{Type: TokenRParen, Value: ")"},
+				{Type: TokenEOF},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -466,6 +479,42 @@ func TestParseExpression(t *testing.T) {
 		{
 			name:    "missing field name",
 			input:   "bH | {0 ->}",
+			wantErr: true,
+		},
+		// parse() function tests
+		{
+			name:    "parse function simple",
+			input:   "parse(bH)",
+			wantErr: false,
+		},
+		{
+			name:    "parse function with byte order",
+			input:   "parse(<bH)",
+			wantErr: false,
+		},
+		{
+			name:    "parse function with array",
+			input:   "parse(4B)",
+			wantErr: false,
+		},
+		{
+			name:    "parse function with pipe",
+			input:   "parse(<bH) | {0 -> key, 1 -> value}",
+			wantErr: false,
+		},
+		{
+			name:    "unknown function",
+			input:   "unknown(bH)",
+			wantErr: true,
+		},
+		{
+			name:    "parse function missing closing paren",
+			input:   "parse(bH",
+			wantErr: true,
+		},
+		{
+			name:    "parse function empty args",
+			input:   "parse()",
 			wantErr: true,
 		},
 	}
@@ -1075,5 +1124,94 @@ func TestParseExpressionWithArray(t *testing.T) {
 				t.Errorf("ParseExpression() returned nil node without error")
 			}
 		})
+	}
+}
+
+func TestParseFunctionEval(t *testing.T) {
+	// Test that parse() function evaluates correctly
+	data := []byte{0xFF, 0x01, 0x02}
+
+	tests := []struct {
+		name  string
+		input string
+		want  []any
+	}{
+		{
+			name:  "parse function simple",
+			input: "parse(<bH)",
+			want:  []any{int8(-1), uint16(513)},
+		},
+		{
+			name:  "parse function with array",
+			input: "parse(<b2B)",
+			want:  []any{int8(-1), []uint8{1, 2}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, err := ParseExpression(tt.input)
+			if err != nil {
+				t.Fatalf("ParseExpression() error = %v", err)
+			}
+
+			result, err := node.Eval(bytes.NewReader(data), nil)
+			if err != nil {
+				t.Fatalf("Eval() error = %v", err)
+			}
+
+			values, ok := result.([]any)
+			if !ok {
+				t.Fatalf("Eval() returned %T, want []any", result)
+			}
+
+			if len(values) != len(tt.want) {
+				t.Fatalf("Eval() len = %d, want %d", len(values), len(tt.want))
+			}
+
+			for i := range values {
+				if !compareValues(values[i], tt.want[i]) {
+					t.Errorf("Eval()[%d] = %v (%T), want %v (%T)", i, values[i], values[i], tt.want[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestParseFunctionWithPipe(t *testing.T) {
+	// Test parse() with pipe to object
+	data := []byte{0xFF, 0x01, 0x02}
+
+	node, err := ParseExpression("parse(<bH) | {0 -> key, 1 -> value}")
+	if err != nil {
+		t.Fatalf("ParseExpression() error = %v", err)
+	}
+
+	result, err := node.Eval(bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Eval() error = %v", err)
+	}
+
+	obj, ok := result.(*Object)
+	if !ok {
+		t.Fatalf("Eval() returned %T, want *Object", result)
+	}
+
+	if len(obj.Fields) != 2 {
+		t.Fatalf("Fields len = %d, want 2", len(obj.Fields))
+	}
+
+	if obj.Fields[0].Name != "key" {
+		t.Errorf("Fields[0].Name = %q, want %q", obj.Fields[0].Name, "key")
+	}
+	if v, ok := obj.Fields[0].Value.(int8); !ok || v != -1 {
+		t.Errorf("Fields[0].Value = %v, want int8(-1)", obj.Fields[0].Value)
+	}
+
+	if obj.Fields[1].Name != "value" {
+		t.Errorf("Fields[1].Name = %q, want %q", obj.Fields[1].Name, "value")
+	}
+	if v, ok := obj.Fields[1].Value.(uint16); !ok || v != 513 {
+		t.Errorf("Fields[1].Value = %v, want uint16(513)", obj.Fields[1].Value)
 	}
 }
