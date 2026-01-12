@@ -5,63 +5,147 @@
 **bq** is the lightweight and portable command-line tool for binary query and modification tool.
 It like `jq` or `yq`, but for binary files, such as images, executables, or any other binary data formats.
 Not only can **bq** read binary data, but also can pretty-print it in human-readable format, and modify
-binary data
-by changing specific fields.
+binary data by changing specific fields.
 
 bq is written in Go and can be easily installed on various platforms, including Windows, macOS, and Linux.
 You can also cross-compile it for different architectures depending on your needs, or download pre-compiled
 binaries.
 
+## Installation
+
+```bash
+go install github.com/cmj0121/bq/cmd/bq@latest
+```
+
+Or build from source:
+
+```bash
+git clone https://github.com/cmj0121/bq.git
+cd bq
+go build -o bq ./cmd/bq
+```
+
+## Usage
+
+```bash
+# Read binary data with format codes
+printf '\xff\x01\x02' | bq '<bH'
+
+# Pretty print with -p flag
+printf '\xff\x01\x02' | bq '<bH' -p
+
+# Read arrays with count prefix
+printf '\x01\x02\x03\x04' | bq '4B' -p
+
+# Create named objects with pipe operator
+printf '\xff\x01\x02' | bq '<bH | {0 -> key, 1 -> value}' -p
+```
+
 ## Syntax
 
 Like `jq` and `yq`, **bq** uses a simple and expressive syntax for querying and modifying binary data.
 It is inspired by [struct][0] module in Python standard library, and using single-character format codes to
-represent data types, like `i` for integer, `f` for float, `s` for string, etc.
+represent data types.
 
-| Character | Size (bytes) | Description       |
-| --------- | ------------ | ----------------- |
-| b         | 1            | The signed char   |
-| B         | 1            | The unsigned char |
-| h         | 2            | The signed short  |
-| H         | 2            | The unsigned short|
-| i         | 4            | The signed int    |
-| I         | 4            | The unsigned int  |
-| q         | 8            | The signed long   |
-| Q         | 8            | The unsigned long |
+### Format Codes
 
-Also, using the following prefixes to specify byte order:
+| Character | Size (bytes) | Go Type  | Description        |
+| --------- | ------------ | -------- | ------------------ |
+| b         | 1            | int8     | The signed char    |
+| B         | 1            | uint8    | The unsigned char  |
+| h         | 2            | int16    | The signed short   |
+| H         | 2            | uint16   | The unsigned short |
+| i         | 4            | int32    | The signed int     |
+| I         | 4            | uint32   | The unsigned int   |
+| q         | 8            | int64    | The signed long    |
+| Q         | 8            | uint64   | The unsigned long  |
 
-- `<` : little-endian
-- `>` : big-endian
-- `@` : native order in the current system
+### Byte Order Prefixes
 
-For example, `<bq` means read the first 9-bits as the little-endian which first byte treated as signed char,
-and the next 8 bytes treated as signed long.
+| Prefix | Description                      |
+| ------ | -------------------------------- |
+| `<`    | Little-endian                    |
+| `>`    | Big-endian                       |
+| `@`    | Native order (system default)    |
 
-In more, you can use digits to specify the number of elements in an array, like `4B` means read 4 unsigned
-chars as an array, and `2H` means read 2 unsigned shorts as an array.
+**Example:** `<bq` means read in little-endian: first byte as signed char, next 8 bytes as signed long.
 
-### Functions
+### Arrays
 
-The `bq` command supports several functions for querying and modifying binary data, that can be combined to
-perform complex operations. The following table list the general functions that can evaluate or combine values,
-or access the specified fields, even naming as the variables.
+Use digit prefix to read multiple elements as an array:
 
-| Function     | Description                                          |
-| ------------ | ---------------------------------------------------- |
-| `parse(...)` | Parse the binary data according to the format string |
-| `\|`         | Pipe the left evaluation result to right function    |
-| `{...}`      | Create an object by grouping fields                  |
+| Expression | Description                             | Result Type   |
+| ---------- | --------------------------------------- | ------------- |
+| `4B`       | Read 4 unsigned chars                   | []uint8       |
+| `2H`       | Read 2 unsigned shorts                  | []uint16      |
+| `<b4B`     | Read 1 signed char + 4 unsigned chars   | int8, []uint8 |
 
-Wihout of the general, the `bq` command evaluate the raw string as the format string to parse the binary data,
-like pass the format string to `parse(...)` function. For example, `bH` is equivalent to `parse("bH")`.
+**Example:**
+
+```bash
+$ printf '\x01\x02\x03\x04' | bq '4B' -p
+Name       Code   Type                    Value                  Hex
+--------------------------------------------------------------------
+0          B      uint8    [1 2 3 4]                       [01 02 03 04]
+```
+
+### Pipe Operator
+
+The pipe operator `|` passes parsed values to subsequent operations:
+
+```text
+<format_codes> | <operation>
+```
 
 ### Objects
 
-In general, the `bq` process the input binary data into a list of variables and without names. You can convert
-it into the object with named fields by using the `{...}` syntax. You MUST TO provides the same number of fields
-names as the number of variables in the input data. For example: `bH | {0 -> key, 1 -> value}` means read a signed
-char and an unsigned short, then create an object with fields named `key` and `value` with the specified values.
-You also can create nested objects by using the same syntax, like `bHQ | {0 -> header, {1 -> data, 2 -> footer}}`.
+Convert parsed values into named fields using the object syntax `{...}`:
+
+```text
+<format_codes> | {<index> -> <name>, ...}
+```
+
+**Syntax:**
+
+- `<index>` - zero-based index into parsed values
+- `<name>` - field name (must not be a single format code character)
+
+**Example:**
+
+```bash
+$ printf '\xff\x01\x02' | bq '<bH | {0 -> header, 1 -> length}' -p
+Name       Code   Type                    Value                  Hex
+--------------------------------------------------------------------
+header     b      int8                       -1                 0xff
+length     H      uint16                    513               0x0201
+```
+
+### Combined Example
+
+Reading a binary header with magic bytes and a length field:
+
+```bash
+$ printf '\x89PNG\x00\x00\x00\x0d' | bq '<4Bi | {0 -> magic, 1 -> chunk_length}' -p
+Name       Code   Type                    Value                  Hex
+--------------------------------------------------------------------
+magic      B      []uint8  [137 80 78 71]                 [89 50 4e 47]
+chunk_length i    int32                      13           0x0000000d
+```
+
+## Flags
+
+| Flag | Description                              |
+| ---- | ---------------------------------------- |
+| `-p` | Pretty print output in table format      |
+| `-v` | Increase verbosity (use multiple times)  |
+| `-f` | Input file (default: stdin with `-`)     |
+
+## Roadmap
+
+- [ ] `parse(...)` function for explicit parsing
+- [ ] Nested objects: `{0 -> a, {1 -> b, 2 -> c}}`
+- [ ] Write/modify binary data
+- [ ] String type support (`s`)
+- [ ] Float type support (`f`, `d`)
 
 [0]: https://docs.python.org/3.14/library/struct.html
