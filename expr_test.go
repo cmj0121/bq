@@ -1796,6 +1796,42 @@ func TestReadNullTerminatedString(t *testing.T) {
 			data: []byte{'h', 'i'},
 			want: "hi",
 		},
+		{
+			name: "string with tab",
+			data: []byte{'h', 'i', '\t', 0},
+			want: "hi\t",
+		},
+		{
+			name: "string with newline",
+			data: []byte{'h', 'i', '\n', 0},
+			want: "hi\n",
+		},
+		// Non-printable character error cases
+		{
+			name:    "non-printable control char 0x01",
+			data:    []byte{'h', 'i', 0x01, 0},
+			wantErr: true,
+		},
+		{
+			name:    "non-printable control char 0x7f (DEL)",
+			data:    []byte{'h', 'i', 0x7f, 0},
+			wantErr: true,
+		},
+		{
+			name:    "non-printable at start",
+			data:    []byte{0x02, 'h', 'i', 0},
+			wantErr: true,
+		},
+		{
+			name:    "non-printable bell char",
+			data:    []byte{'h', 'i', 0x07, 0},
+			wantErr: true,
+		},
+		{
+			name:    "non-printable without null (EOF)",
+			data:    []byte{'h', 0x01},
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1849,6 +1885,25 @@ func TestExpr_ReadString(t *testing.T) {
 			format: "s",
 			data:   []byte{0},
 			want:   []any{""},
+		},
+		// Non-printable character error cases
+		{
+			name:    "non-printable character in string",
+			format:  "s",
+			data:    []byte{'h', 'i', 0x01, 0},
+			wantErr: true,
+		},
+		{
+			name:    "non-printable in mixed format bs",
+			format:  "<Bs",
+			data:    []byte{0x01, 'h', 0x02, 0}, // 0x01 byte is valid, 0x02 in string is not
+			wantErr: true,
+		},
+		{
+			name:   "byte with any value followed by valid string",
+			format: "<Bs",
+			data:   []byte{0x01, 'h', 'i', 0}, // 0x01 is just a byte, "hi" is valid string
+			want:   []any{uint8(1), "hi"},
 		},
 	}
 
