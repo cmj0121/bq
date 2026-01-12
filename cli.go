@@ -28,6 +28,9 @@ type Args struct {
 	// The verbosity level.
 	Verbose int `help:"Increase verbosity level." short:"v" type:"counter"`
 
+	// Pretty print the output in human-readable format.
+	Pretty bool `help:"Pretty print the output." short:"p"`
+
 	// The expression to be applied on the file content, omitted means reading and
 	// printing the content as is.
 	Expr *string `help:"The expression to be applied on the file content." arg:"" optional:""`
@@ -79,5 +82,5 @@ func (a *Args) run() error {
 		return nil
 	}
 
-	return Execute(*a.Expr, a.File)
+	return Execute(*a.Expr, a.File, a.Pretty)
 }

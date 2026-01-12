@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"os"
 	"unsafe"
 
 	"github.com/rs/zerolog/log"
@@ -52,6 +53,18 @@ var formatCodeInfo = map[rune]struct {
 	'I': {4, false}, // unsigned int
 	'q': {8, true},  // signed long
 	'Q': {8, false}, // unsigned long
+}
+
+// formatCodeTypeName returns the human-readable type name for each format code.
+var formatCodeTypeName = map[rune]string{
+	'b': "int8",
+	'B': "uint8",
+	'h': "int16",
+	'H': "uint16",
+	'i': "int32",
+	'I': "uint32",
+	'q': "int64",
+	'Q': "uint64",
 }
 
 // Parse parses a format string and returns an Expr.
@@ -172,8 +185,8 @@ func (fc *FormatCode) decode(buf []byte, order binary.ByteOrder) (any, error) {
 	}
 }
 
-// Execute parses the expression, reads from the reader, and logs the result.
-func Execute(format string, r io.Reader) error {
+// Execute parses the expression, reads from the reader, and outputs the result.
+func Execute(format string, r io.Reader, pretty bool) error {
 	expr, err := Parse(format)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to parse expression")
@@ -186,6 +199,57 @@ func Execute(format string, r io.Reader) error {
 		return err
 	}
 
+	if pretty {
+		return PrettyPrint(os.Stdout, expr, values)
+	}
+
 	log.Info().Any("values", values).Msg("parsed binary data")
 	return nil
+}
+
+// PrettyPrint outputs the parsed values in a human-readable format.
+func PrettyPrint(w io.Writer, expr *Expr, values []any) error {
+	// Print header
+	if _, err := fmt.Fprintf(w, "%-6s %-6s %-8s %20s %20s\n", "Index", "Code", "Type", "Value", "Hex"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "%s\n", "--------------------------------------------------------------"); err != nil {
+		return err
+	}
+
+	for i, val := range values {
+		fc := expr.Formats[i]
+		typeName := formatCodeTypeName[fc.Code]
+		hexStr := formatHex(val)
+
+		if _, err := fmt.Fprintf(w, "%-6d %-6c %-8s %20v %20s\n", i, fc.Code, typeName, val, hexStr); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// formatHex formats a value as a hexadecimal string.
+func formatHex(val any) string {
+	switch v := val.(type) {
+	case int8:
+		return fmt.Sprintf("0x%02x", uint8(v))
+	case uint8:
+		return fmt.Sprintf("0x%02x", v)
+	case int16:
+		return fmt.Sprintf("0x%04x", uint16(v))
+	case uint16:
+		return fmt.Sprintf("0x%04x", v)
+	case int32:
+		return fmt.Sprintf("0x%08x", uint32(v))
+	case uint32:
+		return fmt.Sprintf("0x%08x", v)
+	case int64:
+		return fmt.Sprintf("0x%016x", uint64(v))
+	case uint64:
+		return fmt.Sprintf("0x%016x", v)
+	default:
+		return "N/A"
+	}
 }
