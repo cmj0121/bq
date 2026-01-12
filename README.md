@@ -126,7 +126,7 @@ Convert parsed values into named fields using the object syntax `{...}`:
 **Syntax:**
 
 - `<index>` - zero-based index into parsed values
-- `<name>` - field name (must not be a single format code character)
+- `<name>` - field name
 
 **Example:**
 
@@ -136,6 +136,44 @@ Name       Code   Type                    Value                  Hex
 --------------------------------------------------------------------
 header     b      int8                       -1                 0xff
 length     H      uint16                    513               0x0201
+```
+
+### Nested Objects
+
+Create hierarchical structures using the nested object syntax `<name>: {...}`:
+
+```text
+<format_codes> | {<index> -> <name>, <nested_name>: {<index> -> <name>, ...}}
+```
+
+**Syntax:**
+
+- `<nested_name>:` - nested object field name followed by colon
+- `{...}` - nested object containing field definitions
+
+**Example:**
+
+```bash
+$ printf '\xff\x01\x02\x03' | bq '<bHB | {0 -> header, nested: {1 -> length, 2 -> flag}}' -p
+Name       Code   Type                    Value                  Hex
+--------------------------------------------------------------------
+header     b      int8                       -1                 0xff
+nested     -      object
+  length   H      uint16                    513               0x0201
+  flag     B      uint8                       3                 0x03
+```
+
+Nested objects can be arbitrarily deep:
+
+```bash
+$ printf '\x01\x02\x00\x03\x00\x00\x00' | bq '<bHi | {0 -> a, level1: {1 -> b, level2: {2 -> c}}}' -p
+Name       Code   Type                    Value                  Hex
+--------------------------------------------------------------------
+a          b      int8                        1                 0x01
+level1     -      object
+  b        H      uint16                      2               0x0002
+  level2   -      object
+    c      i      int32                       3           0x00000003
 ```
 
 ### Combined Example
@@ -161,7 +199,7 @@ chunk_length i    int32               218103808           0x0d000000
 ## Roadmap
 
 - [x] `parse(...)` function for explicit parsing
-- [ ] Nested objects: `{0 -> a, {1 -> b, 2 -> c}}`
+- [x] Nested objects: `{0 -> a, nested: {1 -> b, 2 -> c}}`
 - [ ] Write/modify binary data
 - [ ] String type support (`s`)
 - [ ] Float type support (`f`, `d`)

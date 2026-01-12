@@ -1215,3 +1215,492 @@ func TestParseFunctionWithPipe(t *testing.T) {
 		t.Errorf("Fields[1].Value = %v, want uint16(513)", obj.Fields[1].Value)
 	}
 }
+
+// Tests for nested objects feature
+
+func TestTokenizerColon(t *testing.T) {
+	// Test that colon token is recognized
+	tokenizer := NewTokenizer("nested: {0 -> x}")
+
+	tokens := []Token{
+		{Type: TokenIdent, Value: "nested"},
+		{Type: TokenColon, Value: ":"},
+		{Type: TokenLBrace, Value: "{"},
+		{Type: TokenNumber, Value: "0"},
+		{Type: TokenArrow, Value: "->"},
+		{Type: TokenIdent, Value: "x"},
+		{Type: TokenRBrace, Value: "}"},
+		{Type: TokenEOF},
+	}
+
+	for i, want := range tokens {
+		got, err := tokenizer.Next()
+		if err != nil {
+			t.Fatalf("Next() error = %v at token %d", err, i)
+		}
+		if got.Type != want.Type {
+			t.Errorf("Token[%d].Type = %v, want %v", i, got.Type, want.Type)
+		}
+		if want.Value != "" && got.Value != want.Value {
+			t.Errorf("Token[%d].Value = %q, want %q", i, got.Value, want.Value)
+		}
+	}
+}
+
+func TestTokenizerNestedObject(t *testing.T) {
+	// Test tokenizing a full nested object expression
+	input := "<bHB | {0 -> header, nested: {1 -> length, 2 -> flag}}"
+	tokenizer := NewTokenizer(input)
+
+	expectedTokens := []Token{
+		{Type: TokenOrder, Value: "<"},
+		{Type: TokenFormat, Value: "b"},
+		{Type: TokenFormat, Value: "H"},
+		{Type: TokenFormat, Value: "B"},
+		{Type: TokenPipe, Value: "|"},
+		{Type: TokenLBrace, Value: "{"},
+		{Type: TokenNumber, Value: "0"},
+		{Type: TokenArrow, Value: "->"},
+		{Type: TokenIdent, Value: "header"},
+		{Type: TokenComma, Value: ","},
+		{Type: TokenIdent, Value: "nested"},
+		{Type: TokenColon, Value: ":"},
+		{Type: TokenLBrace, Value: "{"},
+		{Type: TokenNumber, Value: "1"},
+		{Type: TokenArrow, Value: "->"},
+		{Type: TokenIdent, Value: "length"},
+		{Type: TokenComma, Value: ","},
+		{Type: TokenNumber, Value: "2"},
+		{Type: TokenArrow, Value: "->"},
+		{Type: TokenIdent, Value: "flag"},
+		{Type: TokenRBrace, Value: "}"},
+		{Type: TokenRBrace, Value: "}"},
+		{Type: TokenEOF},
+	}
+
+	for i, want := range expectedTokens {
+		got, err := tokenizer.Next()
+		if err != nil {
+			t.Fatalf("Next() error = %v at token %d", err, i)
+		}
+		if got.Type != want.Type {
+			t.Errorf("Token[%d].Type = %v, want %v", i, got.Type, want.Type)
+		}
+		if want.Value != "" && got.Value != want.Value {
+			t.Errorf("Token[%d].Value = %q, want %q", i, got.Value, want.Value)
+		}
+	}
+}
+
+func TestParseExpressionNestedObject(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{
+			name:    "simple nested object",
+			input:   "bH | {nested: {0 -> x, 1 -> y}}",
+			wantErr: false,
+		},
+		{
+			name:    "mixed flat and nested",
+			input:   "<bHB | {0 -> header, nested: {1 -> length, 2 -> flag}}",
+			wantErr: false,
+		},
+		{
+			name:    "deeply nested",
+			input:   "bHiI | {0 -> a, level1: {1 -> b, level2: {2 -> c, 3 -> d}}}",
+			wantErr: false,
+		},
+		{
+			name:    "multiple nested at same level",
+			input:   "<bHiI | {first: {0 -> a, 1 -> b}, second: {2 -> c, 3 -> d}}",
+			wantErr: false,
+		},
+		{
+			name:    "nested missing colon",
+			input:   "bH | {nested {0 -> x}}",
+			wantErr: true,
+		},
+		{
+			name:    "nested missing opening brace",
+			input:   "bH | {nested: 0 -> x}",
+			wantErr: true,
+		},
+		{
+			name:    "nested missing closing brace",
+			input:   "bH | {nested: {0 -> x}",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, err := ParseExpression(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseExpression() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && node == nil {
+				t.Errorf("ParseExpression() returned nil node without error")
+			}
+		})
+	}
+}
+
+func TestParseExpressionNestedAST(t *testing.T) {
+	// Test that nested object parsing produces correct AST structure
+	t.Run("simple nested", func(t *testing.T) {
+		node, err := ParseExpression("bH | {nested: {0 -> x, 1 -> y}}")
+		if err != nil {
+			t.Fatalf("ParseExpression() error = %v", err)
+		}
+
+		pipeNode, ok := node.(*PipeNode)
+		if !ok {
+			t.Fatalf("Expected *PipeNode, got %T", node)
+		}
+
+		objNode, ok := pipeNode.Right.(*ObjectNode)
+		if !ok {
+			t.Fatalf("Expected *ObjectNode on right, got %T", pipeNode.Right)
+		}
+
+		if len(objNode.Fields) != 1 {
+			t.Errorf("Expected 1 field, got %d", len(objNode.Fields))
+		}
+
+		// Check nested field
+		field := objNode.Fields[0]
+		if field.Name != "nested" {
+			t.Errorf("Field name = %q, want %q", field.Name, "nested")
+		}
+		if field.Nested == nil {
+			t.Fatal("Expected nested object, got nil")
+		}
+		if len(field.Nested.Fields) != 2 {
+			t.Errorf("Nested fields len = %d, want 2", len(field.Nested.Fields))
+		}
+	})
+
+	t.Run("mixed flat and nested", func(t *testing.T) {
+		node, err := ParseExpression("<bHB | {0 -> header, nested: {1 -> length, 2 -> flag}}")
+		if err != nil {
+			t.Fatalf("ParseExpression() error = %v", err)
+		}
+
+		pipeNode, ok := node.(*PipeNode)
+		if !ok {
+			t.Fatalf("Expected *PipeNode, got %T", node)
+		}
+
+		objNode, ok := pipeNode.Right.(*ObjectNode)
+		if !ok {
+			t.Fatalf("Expected *ObjectNode on right, got %T", pipeNode.Right)
+		}
+
+		if len(objNode.Fields) != 2 {
+			t.Fatalf("Expected 2 fields, got %d", len(objNode.Fields))
+		}
+
+		// Check first field (flat)
+		if objNode.Fields[0].Name != "header" || objNode.Fields[0].Index != 0 || objNode.Fields[0].Nested != nil {
+			t.Errorf("Fields[0] = %+v, want flat field named 'header' at index 0", objNode.Fields[0])
+		}
+
+		// Check second field (nested)
+		if objNode.Fields[1].Name != "nested" || objNode.Fields[1].Nested == nil {
+			t.Errorf("Fields[1] = %+v, want nested field named 'nested'", objNode.Fields[1])
+		}
+		if len(objNode.Fields[1].Nested.Fields) != 2 {
+			t.Errorf("Nested fields len = %d, want 2", len(objNode.Fields[1].Nested.Fields))
+		}
+	})
+}
+
+func TestNestedObjectNodeEval(t *testing.T) {
+	tests := []struct {
+		name      string
+		fields    []FieldDef
+		values    []any
+		wantErr   bool
+		checkFunc func(t *testing.T, obj *Object)
+	}{
+		{
+			name: "simple nested",
+			fields: []FieldDef{
+				{Name: "nested", Nested: &ObjectNode{
+					Fields: []FieldDef{
+						{Index: 0, Name: "x"},
+						{Index: 1, Name: "y"},
+					},
+				}},
+			},
+			values:  []any{int8(1), int8(2)},
+			wantErr: false,
+			checkFunc: func(t *testing.T, obj *Object) {
+				if len(obj.Fields) != 1 {
+					t.Fatalf("Fields len = %d, want 1", len(obj.Fields))
+				}
+				nested, ok := obj.Fields[0].Value.(*Object)
+				if !ok {
+					t.Fatalf("Expected nested *Object, got %T", obj.Fields[0].Value)
+				}
+				if len(nested.Fields) != 2 {
+					t.Errorf("Nested fields len = %d, want 2", len(nested.Fields))
+				}
+				if nested.Fields[0].Value != int8(1) {
+					t.Errorf("Nested x = %v, want 1", nested.Fields[0].Value)
+				}
+				if nested.Fields[1].Value != int8(2) {
+					t.Errorf("Nested y = %v, want 2", nested.Fields[1].Value)
+				}
+			},
+		},
+		{
+			name: "mixed flat and nested",
+			fields: []FieldDef{
+				{Index: 0, Name: "header"},
+				{Name: "nested", Nested: &ObjectNode{
+					Fields: []FieldDef{
+						{Index: 1, Name: "length"},
+						{Index: 2, Name: "flag"},
+					},
+				}},
+			},
+			values:  []any{int8(-1), uint16(513), uint8(3)},
+			wantErr: false,
+			checkFunc: func(t *testing.T, obj *Object) {
+				if len(obj.Fields) != 2 {
+					t.Fatalf("Fields len = %d, want 2", len(obj.Fields))
+				}
+				// Check flat field
+				if obj.Fields[0].Name != "header" || obj.Fields[0].Value != int8(-1) {
+					t.Errorf("Fields[0] = %+v, want header=-1", obj.Fields[0])
+				}
+				// Check nested field
+				nested, ok := obj.Fields[1].Value.(*Object)
+				if !ok {
+					t.Fatalf("Expected nested *Object, got %T", obj.Fields[1].Value)
+				}
+				if nested.Fields[0].Value != uint16(513) {
+					t.Errorf("Nested length = %v, want 513", nested.Fields[0].Value)
+				}
+				if nested.Fields[1].Value != uint8(3) {
+					t.Errorf("Nested flag = %v, want 3", nested.Fields[1].Value)
+				}
+			},
+		},
+		{
+			name: "nested index out of range",
+			fields: []FieldDef{
+				{Name: "nested", Nested: &ObjectNode{
+					Fields: []FieldDef{
+						{Index: 99, Name: "invalid"},
+					},
+				}},
+			},
+			values:  []any{int8(1)},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &ObjectNode{Fields: tt.fields}
+			result, err := node.Eval(nil, tt.values)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Eval() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if tt.wantErr {
+				return
+			}
+
+			obj, ok := result.(*Object)
+			if !ok {
+				t.Fatalf("Eval() returned %T, want *Object", result)
+			}
+
+			if tt.checkFunc != nil {
+				tt.checkFunc(t, obj)
+			}
+		})
+	}
+}
+
+func TestNestedPipeNodeEval(t *testing.T) {
+	// Test full pipeline with nested objects
+	data := []byte{0xFF, 0x01, 0x02, 0x03}
+
+	node, err := ParseExpression("<bHB | {0 -> header, nested: {1 -> length, 2 -> flag}}")
+	if err != nil {
+		t.Fatalf("ParseExpression() error = %v", err)
+	}
+
+	result, err := node.Eval(bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Eval() error = %v", err)
+	}
+
+	obj, ok := result.(*Object)
+	if !ok {
+		t.Fatalf("Eval() returned %T, want *Object", result)
+	}
+
+	if len(obj.Fields) != 2 {
+		t.Fatalf("Fields len = %d, want 2", len(obj.Fields))
+	}
+
+	// Check header field (int8 -1)
+	if obj.Fields[0].Name != "header" {
+		t.Errorf("Fields[0].Name = %q, want %q", obj.Fields[0].Name, "header")
+	}
+	if v, ok := obj.Fields[0].Value.(int8); !ok || v != -1 {
+		t.Errorf("Fields[0].Value = %v, want int8(-1)", obj.Fields[0].Value)
+	}
+
+	// Check nested object
+	if obj.Fields[1].Name != "nested" {
+		t.Errorf("Fields[1].Name = %q, want %q", obj.Fields[1].Name, "nested")
+	}
+	nested, ok := obj.Fields[1].Value.(*Object)
+	if !ok {
+		t.Fatalf("Fields[1].Value expected *Object, got %T", obj.Fields[1].Value)
+	}
+
+	// Check nested fields
+	if len(nested.Fields) != 2 {
+		t.Fatalf("Nested fields len = %d, want 2", len(nested.Fields))
+	}
+	if nested.Fields[0].Name != "length" {
+		t.Errorf("Nested[0].Name = %q, want %q", nested.Fields[0].Name, "length")
+	}
+	if v, ok := nested.Fields[0].Value.(uint16); !ok || v != 513 {
+		t.Errorf("Nested[0].Value = %v, want uint16(513)", nested.Fields[0].Value)
+	}
+	if nested.Fields[1].Name != "flag" {
+		t.Errorf("Nested[1].Name = %q, want %q", nested.Fields[1].Name, "flag")
+	}
+	if v, ok := nested.Fields[1].Value.(uint8); !ok || v != 3 {
+		t.Errorf("Nested[1].Value = %v, want uint8(3)", nested.Fields[1].Value)
+	}
+}
+
+func TestPrettyPrintNestedObject(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		data     []byte
+		contains []string
+	}{
+		{
+			name:  "simple nested object",
+			input: "bH | {nested: {0 -> x, 1 -> y}}",
+			data:  []byte{0x01, 0x02, 0x00},
+			contains: []string{
+				"Name", "Code", "Type", "Value", "Hex",
+				"nested", "object",
+				"x", "b", "int8", "1", "0x01",
+				"y", "H", "uint16", "2", "0x0002",
+			},
+		},
+		{
+			name:  "mixed flat and nested",
+			input: "<bHB | {0 -> header, nested: {1 -> length, 2 -> flag}}",
+			data:  []byte{0xFF, 0x01, 0x02, 0x03},
+			contains: []string{
+				"header", "b", "int8", "-1", "0xff",
+				"nested", "object",
+				"length", "H", "uint16", "513", "0x0201",
+				"flag", "B", "uint8", "3", "0x03",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, err := ParseExpression(tt.input)
+			if err != nil {
+				t.Fatalf("ParseExpression() error = %v", err)
+			}
+
+			result, err := node.Eval(bytes.NewReader(tt.data), nil)
+			if err != nil {
+				t.Fatalf("Eval() error = %v", err)
+			}
+
+			var buf bytes.Buffer
+			if err := PrettyPrintResult(&buf, node, result); err != nil {
+				t.Fatalf("PrettyPrintResult() error = %v", err)
+			}
+
+			output := buf.String()
+			for _, want := range tt.contains {
+				if !bytes.Contains([]byte(output), []byte(want)) {
+					t.Errorf("PrettyPrintResult() output missing %q\nGot:\n%s", want, output)
+				}
+			}
+		})
+	}
+}
+
+func TestDeeplyNestedObject(t *testing.T) {
+	// Test deeply nested object structure (3 levels)
+	data := []byte{0x01, 0x02, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}
+
+	node, err := ParseExpression("<bHiQ | {0 -> a, level1: {1 -> b, level2: {2 -> c, 3 -> d}}}")
+	if err != nil {
+		t.Fatalf("ParseExpression() error = %v", err)
+	}
+
+	result, err := node.Eval(bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Eval() error = %v", err)
+	}
+
+	obj, ok := result.(*Object)
+	if !ok {
+		t.Fatalf("Expected *Object, got %T", result)
+	}
+
+	// Verify structure: {a, level1: {b, level2: {c, d}}}
+	if len(obj.Fields) != 2 {
+		t.Fatalf("Top level fields = %d, want 2", len(obj.Fields))
+	}
+
+	// Check 'a' field
+	if obj.Fields[0].Name != "a" || obj.Fields[0].Value != int8(1) {
+		t.Errorf("Field 'a' = %+v, want int8(1)", obj.Fields[0])
+	}
+
+	// Check level1
+	level1, ok := obj.Fields[1].Value.(*Object)
+	if !ok {
+		t.Fatalf("Expected level1 *Object, got %T", obj.Fields[1].Value)
+	}
+	if len(level1.Fields) != 2 {
+		t.Fatalf("Level1 fields = %d, want 2", len(level1.Fields))
+	}
+	if level1.Fields[0].Name != "b" || level1.Fields[0].Value != uint16(2) {
+		t.Errorf("Field 'b' = %+v, want uint16(2)", level1.Fields[0])
+	}
+
+	// Check level2
+	level2, ok := level1.Fields[1].Value.(*Object)
+	if !ok {
+		t.Fatalf("Expected level2 *Object, got %T", level1.Fields[1].Value)
+	}
+	if len(level2.Fields) != 2 {
+		t.Fatalf("Level2 fields = %d, want 2", len(level2.Fields))
+	}
+	if level2.Fields[0].Name != "c" || level2.Fields[0].Value != int32(3) {
+		t.Errorf("Field 'c' = %+v, want int32(3)", level2.Fields[0])
+	}
+	if level2.Fields[1].Name != "d" || level2.Fields[1].Value != uint64(4) {
+		t.Errorf("Field 'd' = %+v, want uint64(4)", level2.Fields[1])
+	}
+}
