@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"unsafe"
 
 	"github.com/rs/zerolog/log"
@@ -224,6 +225,207 @@ func isDigit(ch rune) bool {
 
 func isLetter(ch rune) bool {
 	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+}
+
+// Parser uses the tokenizer to build an AST from an expression string.
+type Parser struct {
+	tokenizer *Tokenizer
+	current   Token
+}
+
+// NewParser creates a new parser for the given input.
+func NewParser(input string) *Parser {
+	return &Parser{
+		tokenizer: NewTokenizer(input),
+	}
+}
+
+// ParseExpression parses an expression and returns the root AST node.
+// Grammar:
+//
+//	Expression  → Pipe
+//	Pipe        → Primary ('|' Object)?
+//	Primary     → FormatExpr
+//	FormatExpr  → ByteOrder? FormatCodes
+//	Object      → '{' FieldList '}'
+//	FieldList   → FieldDef (',' FieldDef)*
+//	FieldDef    → NUMBER '->' IDENTIFIER
+func ParseExpression(input string) (Node, error) {
+	p := NewParser(input)
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+	return p.parseExpression()
+}
+
+// advance moves to the next token.
+func (p *Parser) advance() error {
+	tok, err := p.tokenizer.Next()
+	if err != nil {
+		return err
+	}
+	p.current = tok
+	return nil
+}
+
+// parseExpression parses the top-level expression (Pipe rule).
+func (p *Parser) parseExpression() (Node, error) {
+	return p.parsePipe()
+}
+
+// parsePipe parses: Primary ('|' Object)?
+func (p *Parser) parsePipe() (Node, error) {
+	left, err := p.parsePrimary()
+	if err != nil {
+		return nil, err
+	}
+
+	// Check for pipe operator
+	if p.current.Type == TokenPipe {
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+
+		right, err := p.parseObject()
+		if err != nil {
+			return nil, err
+		}
+
+		return &PipeNode{Left: left, Right: right}, nil
+	}
+
+	return left, nil
+}
+
+// parsePrimary parses: FormatExpr
+func (p *Parser) parsePrimary() (Node, error) {
+	return p.parseFormatExpr()
+}
+
+// parseFormatExpr parses: ByteOrder? FormatCodes
+func (p *Parser) parseFormatExpr() (Node, error) {
+	expr := &Expr{
+		Order:   NativeOrder,
+		Formats: make([]FormatCode, 0),
+	}
+
+	// Check for byte order prefix
+	if p.current.Type == TokenOrder {
+		switch p.current.Value {
+		case "<":
+			expr.Order = LittleEndian
+		case ">":
+			expr.Order = BigEndian
+		case "@":
+			expr.Order = NativeOrder
+		}
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+	}
+
+	// Parse format codes
+	for p.current.Type == TokenFormat {
+		code := rune(p.current.Value[0])
+		info := formatCodeInfo[code]
+		expr.Formats = append(expr.Formats, FormatCode{
+			Code:   code,
+			Size:   info.size,
+			Signed: info.signed,
+		})
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+	}
+
+	if len(expr.Formats) == 0 {
+		return nil, fmt.Errorf("expected format codes at position %d", p.current.Pos)
+	}
+
+	return &FormatNode{Expr: expr}, nil
+}
+
+// parseObject parses: '{' FieldList '}'
+func (p *Parser) parseObject() (Node, error) {
+	if p.current.Type != TokenLBrace {
+		return nil, fmt.Errorf("expected '{' at position %d, got %q", p.current.Pos, p.current.Value)
+	}
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+
+	fields, err := p.parseFieldList()
+	if err != nil {
+		return nil, err
+	}
+
+	if p.current.Type != TokenRBrace {
+		return nil, fmt.Errorf("expected '}' at position %d, got %q", p.current.Pos, p.current.Value)
+	}
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+
+	return &ObjectNode{Fields: fields}, nil
+}
+
+// parseFieldList parses: FieldDef (',' FieldDef)*
+func (p *Parser) parseFieldList() ([]FieldDef, error) {
+	fields := make([]FieldDef, 0)
+
+	// Parse first field
+	fd, err := p.parseFieldDef()
+	if err != nil {
+		return nil, err
+	}
+	fields = append(fields, fd)
+
+	// Parse remaining fields
+	for p.current.Type == TokenComma {
+		if err := p.advance(); err != nil {
+			return nil, err
+		}
+		fd, err := p.parseFieldDef()
+		if err != nil {
+			return nil, err
+		}
+		fields = append(fields, fd)
+	}
+
+	return fields, nil
+}
+
+// parseFieldDef parses: NUMBER '->' IDENTIFIER
+func (p *Parser) parseFieldDef() (FieldDef, error) {
+	if p.current.Type != TokenNumber {
+		return FieldDef{}, fmt.Errorf("expected index number at position %d, got %q", p.current.Pos, p.current.Value)
+	}
+
+	index, err := strconv.Atoi(p.current.Value)
+	if err != nil {
+		return FieldDef{}, fmt.Errorf("invalid index number %q: %w", p.current.Value, err)
+	}
+	if err := p.advance(); err != nil {
+		return FieldDef{}, err
+	}
+
+	if p.current.Type != TokenArrow {
+		return FieldDef{}, fmt.Errorf("expected '->' at position %d, got %q", p.current.Pos, p.current.Value)
+	}
+	if err := p.advance(); err != nil {
+		return FieldDef{}, err
+	}
+
+	if p.current.Type != TokenIdent {
+		return FieldDef{}, fmt.Errorf("expected field name at position %d, got %q", p.current.Pos, p.current.Value)
+	}
+
+	name := p.current.Value
+	if err := p.advance(); err != nil {
+		return FieldDef{}, err
+	}
+
+	return FieldDef{Index: index, Name: name}, nil
 }
 
 // ByteOrder represents the byte order (endianness) for reading binary data.
