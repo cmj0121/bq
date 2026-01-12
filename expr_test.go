@@ -319,3 +319,438 @@ func TestFormatHex(t *testing.T) {
 		})
 	}
 }
+
+func TestTokenizer(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		tokens []Token
+	}{
+		{
+			name:  "simple format",
+			input: "bH",
+			tokens: []Token{
+				{Type: TokenFormat, Value: "b"},
+				{Type: TokenFormat, Value: "H"},
+				{Type: TokenEOF},
+			},
+		},
+		{
+			name:  "format with order",
+			input: "<bH",
+			tokens: []Token{
+				{Type: TokenOrder, Value: "<"},
+				{Type: TokenFormat, Value: "b"},
+				{Type: TokenFormat, Value: "H"},
+				{Type: TokenEOF},
+			},
+		},
+		{
+			name:  "pipe and object",
+			input: "bH | {0 -> key, 1 -> value}",
+			tokens: []Token{
+				{Type: TokenFormat, Value: "b"},
+				{Type: TokenFormat, Value: "H"},
+				{Type: TokenPipe, Value: "|"},
+				{Type: TokenLBrace, Value: "{"},
+				{Type: TokenNumber, Value: "0"},
+				{Type: TokenArrow, Value: "->"},
+				{Type: TokenIdent, Value: "key"},
+				{Type: TokenComma, Value: ","},
+				{Type: TokenNumber, Value: "1"},
+				{Type: TokenArrow, Value: "->"},
+				{Type: TokenIdent, Value: "value"},
+				{Type: TokenRBrace, Value: "}"},
+				{Type: TokenEOF},
+			},
+		},
+		{
+			name:  "all byte orders",
+			input: "< > @",
+			tokens: []Token{
+				{Type: TokenOrder, Value: "<"},
+				{Type: TokenOrder, Value: ">"},
+				{Type: TokenOrder, Value: "@"},
+				{Type: TokenEOF},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokenizer := NewTokenizer(tt.input)
+			for i, want := range tt.tokens {
+				got, err := tokenizer.Next()
+				if err != nil {
+					t.Fatalf("Next() error = %v at token %d", err, i)
+				}
+				if got.Type != want.Type {
+					t.Errorf("Token[%d].Type = %v, want %v", i, got.Type, want.Type)
+				}
+				if want.Value != "" && got.Value != want.Value {
+					t.Errorf("Token[%d].Value = %q, want %q", i, got.Value, want.Value)
+				}
+			}
+		})
+	}
+}
+
+func TestTokenizerPeek(t *testing.T) {
+	tokenizer := NewTokenizer("bH")
+
+	// Peek should not consume the token
+	tok1, err := tokenizer.Peek()
+	if err != nil {
+		t.Fatalf("Peek() error = %v", err)
+	}
+	if tok1.Type != TokenFormat || tok1.Value != "b" {
+		t.Errorf("Peek() = %v, want TokenFormat 'b'", tok1)
+	}
+
+	// Next should return the same token
+	tok2, err := tokenizer.Next()
+	if err != nil {
+		t.Fatalf("Next() error = %v", err)
+	}
+	if tok2.Type != tok1.Type || tok2.Value != tok1.Value {
+		t.Errorf("Next() after Peek() = %v, want %v", tok2, tok1)
+	}
+}
+
+func TestParseExpression(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{
+			name:    "simple format",
+			input:   "bH",
+			wantErr: false,
+		},
+		{
+			name:    "format with byte order",
+			input:   "<bH",
+			wantErr: false,
+		},
+		{
+			name:    "pipe with object",
+			input:   "bH | {0 -> key, 1 -> value}",
+			wantErr: false,
+		},
+		{
+			name:    "multiple fields",
+			input:   "<bHi | {0 -> first, 1 -> second, 2 -> third}",
+			wantErr: false,
+		},
+		{
+			name:    "empty input",
+			input:   "",
+			wantErr: true,
+		},
+		{
+			name:    "missing format codes",
+			input:   "| {0 -> x}",
+			wantErr: true,
+		},
+		{
+			name:    "invalid object syntax",
+			input:   "bH | {x -> key}",
+			wantErr: true,
+		},
+		{
+			name:    "missing arrow",
+			input:   "bH | {0 key}",
+			wantErr: true,
+		},
+		{
+			name:    "missing field name",
+			input:   "bH | {0 ->}",
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, err := ParseExpression(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseExpression() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && node == nil {
+				t.Errorf("ParseExpression() returned nil node without error")
+			}
+		})
+	}
+}
+
+func TestParseExpressionAST(t *testing.T) {
+	// Test that parsing produces the correct AST structure
+	t.Run("format only", func(t *testing.T) {
+		node, err := ParseExpression("<bH")
+		if err != nil {
+			t.Fatalf("ParseExpression() error = %v", err)
+		}
+
+		formatNode, ok := node.(*FormatNode)
+		if !ok {
+			t.Fatalf("Expected *FormatNode, got %T", node)
+		}
+
+		if formatNode.Order != LittleEndian {
+			t.Errorf("Order = %v, want LittleEndian", formatNode.Order)
+		}
+
+		if len(formatNode.Formats) != 2 {
+			t.Errorf("Formats len = %d, want 2", len(formatNode.Formats))
+		}
+	})
+
+	t.Run("pipe with object", func(t *testing.T) {
+		node, err := ParseExpression("bH | {0 -> key, 1 -> value}")
+		if err != nil {
+			t.Fatalf("ParseExpression() error = %v", err)
+		}
+
+		pipeNode, ok := node.(*PipeNode)
+		if !ok {
+			t.Fatalf("Expected *PipeNode, got %T", node)
+		}
+
+		// Check left side is FormatNode
+		_, ok = pipeNode.Left.(*FormatNode)
+		if !ok {
+			t.Errorf("Left node: expected *FormatNode, got %T", pipeNode.Left)
+		}
+
+		// Check right side is ObjectNode
+		objectNode, ok := pipeNode.Right.(*ObjectNode)
+		if !ok {
+			t.Fatalf("Right node: expected *ObjectNode, got %T", pipeNode.Right)
+		}
+
+		if len(objectNode.Fields) != 2 {
+			t.Errorf("Fields len = %d, want 2", len(objectNode.Fields))
+		}
+
+		if objectNode.Fields[0].Index != 0 || objectNode.Fields[0].Name != "key" {
+			t.Errorf("Fields[0] = %v, want {0, key}", objectNode.Fields[0])
+		}
+
+		if objectNode.Fields[1].Index != 1 || objectNode.Fields[1].Name != "value" {
+			t.Errorf("Fields[1] = %v, want {1, value}", objectNode.Fields[1])
+		}
+	})
+}
+
+func TestObjectNodeEval(t *testing.T) {
+	tests := []struct {
+		name       string
+		fields     []FieldDef
+		values     []any
+		wantFields []ObjectField
+		wantErr    bool
+	}{
+		{
+			name: "simple object",
+			fields: []FieldDef{
+				{Index: 0, Name: "key"},
+				{Index: 1, Name: "value"},
+			},
+			values: []any{int8(-1), uint16(513)},
+			wantFields: []ObjectField{
+				{Name: "key", Value: int8(-1)},
+				{Name: "value", Value: uint16(513)},
+			},
+			wantErr: false,
+		},
+		{
+			name: "reorder fields",
+			fields: []FieldDef{
+				{Index: 1, Name: "second"},
+				{Index: 0, Name: "first"},
+			},
+			values: []any{int8(1), int8(2)},
+			wantFields: []ObjectField{
+				{Name: "second", Value: int8(2)},
+				{Name: "first", Value: int8(1)},
+			},
+			wantErr: false,
+		},
+		{
+			name: "index out of range",
+			fields: []FieldDef{
+				{Index: 5, Name: "invalid"},
+			},
+			values:  []any{int8(1)},
+			wantErr: true,
+		},
+		{
+			name: "negative index",
+			fields: []FieldDef{
+				{Index: -1, Name: "invalid"},
+			},
+			values:  []any{int8(1)},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node := &ObjectNode{Fields: tt.fields}
+			result, err := node.Eval(nil, tt.values)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Eval() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+
+			if tt.wantErr {
+				return
+			}
+
+			obj, ok := result.(*Object)
+			if !ok {
+				t.Fatalf("Eval() returned %T, want *Object", result)
+			}
+
+			if len(obj.Fields) != len(tt.wantFields) {
+				t.Errorf("Fields len = %d, want %d", len(obj.Fields), len(tt.wantFields))
+				return
+			}
+
+			for i, want := range tt.wantFields {
+				got := obj.Fields[i]
+				if got.Name != want.Name || got.Value != want.Value {
+					t.Errorf("Fields[%d] = %v, want %v", i, got, want)
+				}
+			}
+		})
+	}
+}
+
+func TestPipeNodeEval(t *testing.T) {
+	// Test full pipeline: FormatNode | ObjectNode
+	data := []byte{0xFF, 0x01, 0x02}
+
+	node, err := ParseExpression("<bH | {0 -> key, 1 -> value}")
+	if err != nil {
+		t.Fatalf("ParseExpression() error = %v", err)
+	}
+
+	result, err := node.Eval(bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Eval() error = %v", err)
+	}
+
+	obj, ok := result.(*Object)
+	if !ok {
+		t.Fatalf("Eval() returned %T, want *Object", result)
+	}
+
+	if len(obj.Fields) != 2 {
+		t.Fatalf("Fields len = %d, want 2", len(obj.Fields))
+	}
+
+	// Check key field (int8 -1)
+	if obj.Fields[0].Name != "key" {
+		t.Errorf("Fields[0].Name = %q, want %q", obj.Fields[0].Name, "key")
+	}
+	if v, ok := obj.Fields[0].Value.(int8); !ok || v != -1 {
+		t.Errorf("Fields[0].Value = %v, want int8(-1)", obj.Fields[0].Value)
+	}
+
+	// Check value field (uint16 513)
+	if obj.Fields[1].Name != "value" {
+		t.Errorf("Fields[1].Name = %q, want %q", obj.Fields[1].Name, "value")
+	}
+	if v, ok := obj.Fields[1].Value.(uint16); !ok || v != 513 {
+		t.Errorf("Fields[1].Value = %v, want uint16(513)", obj.Fields[1].Value)
+	}
+}
+
+func TestPrettyPrintResult(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		data     []byte
+		contains []string
+	}{
+		{
+			name:  "format only",
+			input: "<bH",
+			data:  []byte{0xFF, 0x01, 0x02},
+			contains: []string{
+				"Name", "Code", "Type", "Value", "Hex",
+				"0", "b", "int8", "-1", "0xff",
+				"1", "H", "uint16", "513", "0x0201",
+			},
+		},
+		{
+			name:  "pipe with object",
+			input: "<bH | {0 -> key, 1 -> value}",
+			data:  []byte{0xFF, 0x01, 0x02},
+			contains: []string{
+				"Name", "Code", "Type", "Value", "Hex",
+				"key", "b", "int8", "-1", "0xff",
+				"value", "H", "uint16", "513", "0x0201",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, err := ParseExpression(tt.input)
+			if err != nil {
+				t.Fatalf("ParseExpression() error = %v", err)
+			}
+
+			result, err := node.Eval(bytes.NewReader(tt.data), nil)
+			if err != nil {
+				t.Fatalf("Eval() error = %v", err)
+			}
+
+			var buf bytes.Buffer
+			if err := PrettyPrintResult(&buf, node, result); err != nil {
+				t.Fatalf("PrettyPrintResult() error = %v", err)
+			}
+
+			output := buf.String()
+			for _, want := range tt.contains {
+				if !bytes.Contains([]byte(output), []byte(want)) {
+					t.Errorf("PrettyPrintResult() output missing %q\nGot:\n%s", want, output)
+				}
+			}
+		})
+	}
+}
+
+func TestInferTypeInfo(t *testing.T) {
+	tests := []struct {
+		val      any
+		wantCode rune
+		wantType string
+	}{
+		{int8(0), 'b', "int8"},
+		{uint8(0), 'B', "uint8"},
+		{int16(0), 'h', "int16"},
+		{uint16(0), 'H', "uint16"},
+		{int32(0), 'i', "int32"},
+		{uint32(0), 'I', "uint32"},
+		{int64(0), 'q', "int64"},
+		{uint64(0), 'Q', "uint64"},
+		{"string", '?', "unknown"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.wantType, func(t *testing.T) {
+			code, typeName := inferTypeInfo(tt.val)
+			if code != tt.wantCode {
+				t.Errorf("inferTypeInfo() code = %c, want %c", code, tt.wantCode)
+			}
+			if typeName != tt.wantType {
+				t.Errorf("inferTypeInfo() type = %s, want %s", typeName, tt.wantType)
+			}
+		})
+	}
+}
