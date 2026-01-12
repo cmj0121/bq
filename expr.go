@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"strconv"
+	"strings"
 	"unsafe"
 
 	"github.com/rs/zerolog/log"
@@ -170,9 +171,9 @@ func (t *Tokenizer) Next() (Token, error) {
 		return t.scanNumber(startPos)
 	}
 
-	// Format codes (single character) - only if not followed by non-format-code alphanumeric chars
+	// Format codes (single character) - only if not followed by non-format-code letters
 	// This distinguishes format codes like 'b' from identifiers like 'bar'
-	// Examples: 'bH' -> two format codes, 'bar' -> identifier
+	// Examples: 'bH' -> two format codes, 'b4B' -> format b, number 4, format B, 'bar' -> identifier
 	if _, ok := formatCodeInfo[ch]; ok {
 		nextPos := t.pos + 1
 		if nextPos >= len(t.input) {
@@ -181,10 +182,10 @@ func (t *Tokenizer) Next() (Token, error) {
 			return Token{Type: TokenFormat, Value: string(ch), Pos: startPos}, nil
 		}
 		nextCh := t.input[nextPos]
-		// If next char is also a format code or not alphanumeric, treat current as format code
-		// Otherwise, treat as start of identifier
+		// If next char is a format code, digit, or not alphanumeric, treat current as format code
+		// Only treat as identifier start if followed by non-format-code letter
 		_, nextIsFormat := formatCodeInfo[nextCh]
-		if !isAlphanumeric(nextCh) || nextIsFormat {
+		if !isAlphanumeric(nextCh) || nextIsFormat || isDigit(nextCh) {
 			t.pos++
 			return Token{Type: TokenFormat, Value: string(ch), Pos: startPos}, nil
 		}
@@ -320,7 +321,8 @@ func (p *Parser) parsePrimary() (Node, error) {
 	return p.parseFormatExpr()
 }
 
-// parseFormatExpr parses: ByteOrder? FormatCodes
+// parseFormatExpr parses: ByteOrder? (Count? FormatCode)+
+// Count is an optional digit prefix for arrays, e.g., 4B means 4 unsigned chars.
 func (p *Parser) parseFormatExpr() (Node, error) {
 	expr := &Expr{
 		Order:   NativeOrder,
@@ -342,14 +344,36 @@ func (p *Parser) parseFormatExpr() (Node, error) {
 		}
 	}
 
-	// Parse format codes
-	for p.current.Type == TokenFormat {
+	// Parse format codes with optional count prefix
+	for p.current.Type == TokenFormat || p.current.Type == TokenNumber {
+		count := 1
+
+		// Check for count prefix (e.g., 4B means 4 unsigned chars)
+		if p.current.Type == TokenNumber {
+			var err error
+			count, err = strconv.Atoi(p.current.Value)
+			if err != nil {
+				return nil, fmt.Errorf("invalid count %q: %w", p.current.Value, err)
+			}
+			if count < 1 {
+				return nil, fmt.Errorf("count must be at least 1, got %d", count)
+			}
+			if err := p.advance(); err != nil {
+				return nil, err
+			}
+			// After a number, we must have a format code
+			if p.current.Type != TokenFormat {
+				return nil, fmt.Errorf("expected format code after count at position %d", p.current.Pos)
+			}
+		}
+
 		code := rune(p.current.Value[0])
 		info := formatCodeInfo[code]
 		expr.Formats = append(expr.Formats, FormatCode{
 			Code:   code,
 			Size:   info.size,
 			Signed: info.signed,
+			Count:  count,
 		})
 		if err := p.advance(); err != nil {
 			return nil, err
@@ -462,10 +486,12 @@ const (
 type FormatCode struct {
 	// Code is the single character format code (b, B, h, H, i, I, q, Q).
 	Code rune
-	// Size is the number of bytes this format code reads.
+	// Size is the number of bytes this format code reads (per element).
 	Size int
 	// Signed indicates whether the value is signed.
 	Signed bool
+	// Count is the number of elements to read (1 for single value, >1 for array).
+	Count int
 }
 
 // Expr represents a parsed binary format expression.
@@ -507,6 +533,7 @@ var formatCodeTypeName = map[rune]string{
 // The format string consists of an optional byte order prefix followed by format codes.
 // Byte order prefixes: '<' (little-endian), '>' (big-endian), '@' (native)
 // Format codes: b, B, h, H, i, I, q, Q
+// Count prefix: optional digit(s) before format code, e.g., 4B means 4 unsigned chars
 func Parse(format string) (*Expr, error) {
 	if len(format) == 0 {
 		return nil, fmt.Errorf("empty format string")
@@ -518,23 +545,45 @@ func Parse(format string) (*Expr, error) {
 	}
 
 	runes := []rune(format)
-	start := 0
+	i := 0
 
 	// Check for byte order prefix
 	switch runes[0] {
 	case '<':
 		expr.Order = LittleEndian
-		start = 1
+		i = 1
 	case '>':
 		expr.Order = BigEndian
-		start = 1
+		i = 1
 	case '@':
 		expr.Order = NativeOrder
-		start = 1
+		i = 1
 	}
 
-	// Parse format codes
-	for i := start; i < len(runes); i++ {
+	// Parse format codes with optional count prefix
+	for i < len(runes) {
+		count := 1
+
+		// Check for count prefix (digits)
+		if isDigit(runes[i]) {
+			countStart := i
+			for i < len(runes) && isDigit(runes[i]) {
+				i++
+			}
+			var err error
+			count, err = strconv.Atoi(string(runes[countStart:i]))
+			if err != nil {
+				return nil, fmt.Errorf("invalid count: %w", err)
+			}
+			if count < 1 {
+				return nil, fmt.Errorf("count must be at least 1, got %d", count)
+			}
+		}
+
+		if i >= len(runes) {
+			return nil, fmt.Errorf("expected format code after count")
+		}
+
 		code := runes[i]
 		info, ok := formatCodeInfo[code]
 		if !ok {
@@ -545,7 +594,9 @@ func Parse(format string) (*Expr, error) {
 			Code:   code,
 			Size:   info.size,
 			Signed: info.signed,
+			Count:  count,
 		})
+		i++
 	}
 
 	if len(expr.Formats) == 0 {
@@ -556,24 +607,99 @@ func Parse(format string) (*Expr, error) {
 }
 
 // Read reads binary data from the reader and returns the parsed values.
+// For format codes with Count > 1, returns a typed slice (e.g., []int8 for 4b).
 func (e *Expr) Read(r io.Reader) ([]any, error) {
 	order := e.binaryOrder()
 	values := make([]any, 0, len(e.Formats))
 
 	for _, fc := range e.Formats {
-		buf := make([]byte, fc.Size)
-		if _, err := io.ReadFull(r, buf); err != nil {
-			return nil, fmt.Errorf("failed to read %d bytes for format %c: %w", fc.Size, fc.Code, err)
+		count := fc.Count
+		if count == 0 {
+			count = 1 // default for backward compatibility
 		}
 
-		val, err := fc.decode(buf, order)
-		if err != nil {
-			return nil, err
+		if count == 1 {
+			// Single value
+			buf := make([]byte, fc.Size)
+			if _, err := io.ReadFull(r, buf); err != nil {
+				return nil, fmt.Errorf("failed to read %d bytes for format %c: %w", fc.Size, fc.Code, err)
+			}
+			val, err := fc.decode(buf, order)
+			if err != nil {
+				return nil, err
+			}
+			values = append(values, val)
+		} else {
+			// Array of values
+			arr, err := fc.decodeArray(r, order, count)
+			if err != nil {
+				return nil, err
+			}
+			values = append(values, arr)
 		}
-		values = append(values, val)
 	}
 
 	return values, nil
+}
+
+// decodeArray reads count elements and returns a typed slice.
+func (fc *FormatCode) decodeArray(r io.Reader, order binary.ByteOrder, count int) (any, error) {
+	totalSize := fc.Size * count
+	buf := make([]byte, totalSize)
+	if _, err := io.ReadFull(r, buf); err != nil {
+		return nil, fmt.Errorf("failed to read %d bytes for %d x format %c: %w", totalSize, count, fc.Code, err)
+	}
+
+	switch fc.Code {
+	case 'b': // []int8
+		arr := make([]int8, count)
+		for i := 0; i < count; i++ {
+			arr[i] = int8(buf[i])
+		}
+		return arr, nil
+	case 'B': // []uint8
+		arr := make([]uint8, count)
+		copy(arr, buf)
+		return arr, nil
+	case 'h': // []int16
+		arr := make([]int16, count)
+		for i := 0; i < count; i++ {
+			arr[i] = int16(order.Uint16(buf[i*2:]))
+		}
+		return arr, nil
+	case 'H': // []uint16
+		arr := make([]uint16, count)
+		for i := 0; i < count; i++ {
+			arr[i] = order.Uint16(buf[i*2:])
+		}
+		return arr, nil
+	case 'i': // []int32
+		arr := make([]int32, count)
+		for i := 0; i < count; i++ {
+			arr[i] = int32(order.Uint32(buf[i*4:]))
+		}
+		return arr, nil
+	case 'I': // []uint32
+		arr := make([]uint32, count)
+		for i := 0; i < count; i++ {
+			arr[i] = order.Uint32(buf[i*4:])
+		}
+		return arr, nil
+	case 'q': // []int64
+		arr := make([]int64, count)
+		for i := 0; i < count; i++ {
+			arr[i] = int64(order.Uint64(buf[i*8:]))
+		}
+		return arr, nil
+	case 'Q': // []uint64
+		arr := make([]uint64, count)
+		for i := 0; i < count; i++ {
+			arr[i] = order.Uint64(buf[i*8:])
+		}
+		return arr, nil
+	default:
+		return nil, fmt.Errorf("unknown format code: %c", fc.Code)
+	}
 }
 
 // binaryOrder returns the binary.ByteOrder for this expression.
@@ -685,9 +811,38 @@ func formatHex(val any) string {
 		return fmt.Sprintf("0x%016x", uint64(v))
 	case uint64:
 		return fmt.Sprintf("0x%016x", v)
+	// Array types
+	case []int8:
+		return formatHexArray(v, func(x int8) string { return fmt.Sprintf("%02x", uint8(x)) })
+	case []uint8:
+		return formatHexArray(v, func(x uint8) string { return fmt.Sprintf("%02x", x) })
+	case []int16:
+		return formatHexArray(v, func(x int16) string { return fmt.Sprintf("%04x", uint16(x)) })
+	case []uint16:
+		return formatHexArray(v, func(x uint16) string { return fmt.Sprintf("%04x", x) })
+	case []int32:
+		return formatHexArray(v, func(x int32) string { return fmt.Sprintf("%08x", uint32(x)) })
+	case []uint32:
+		return formatHexArray(v, func(x uint32) string { return fmt.Sprintf("%08x", x) })
+	case []int64:
+		return formatHexArray(v, func(x int64) string { return fmt.Sprintf("%016x", uint64(x)) })
+	case []uint64:
+		return formatHexArray(v, func(x uint64) string { return fmt.Sprintf("%016x", x) })
 	default:
 		return "N/A"
 	}
+}
+
+// formatHexArray formats an array of values as a hexadecimal string.
+func formatHexArray[T any](arr []T, format func(T) string) string {
+	if len(arr) == 0 {
+		return "[]"
+	}
+	parts := make([]string, len(arr))
+	for i, v := range arr {
+		parts[i] = format(v)
+	}
+	return fmt.Sprintf("[%s]", strings.Join(parts, " "))
 }
 
 // PrettyPrintResult outputs any evaluation result in a human-readable format.
@@ -771,6 +926,23 @@ func inferTypeInfo(val any) (rune, string) {
 		return 'q', "int64"
 	case uint64:
 		return 'Q', "uint64"
+	// Array types
+	case []int8:
+		return 'b', "[]int8"
+	case []uint8:
+		return 'B', "[]uint8"
+	case []int16:
+		return 'h', "[]int16"
+	case []uint16:
+		return 'H', "[]uint16"
+	case []int32:
+		return 'i', "[]int32"
+	case []uint32:
+		return 'I', "[]uint32"
+	case []int64:
+		return 'q', "[]int64"
+	case []uint64:
+		return 'Q', "[]uint64"
 	default:
 		return '?', "unknown"
 	}
