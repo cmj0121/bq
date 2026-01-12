@@ -49,16 +49,17 @@ represent data types.
 
 ### Format Codes
 
-| Character | Size (bytes) | Go Type  | Description        |
-| --------- | ------------ | -------- | ------------------ |
-| b         | 1            | int8     | The signed char    |
-| B         | 1            | uint8    | The unsigned char  |
-| h         | 2            | int16    | The signed short   |
-| H         | 2            | uint16   | The unsigned short |
-| i         | 4            | int32    | The signed int     |
-| I         | 4            | uint32   | The unsigned int   |
-| q         | 8            | int64    | The signed long    |
-| Q         | 8            | uint64   | The unsigned long  |
+| Character | Size (bytes) | Go Type  | Description              |
+| --------- | ------------ | -------- | ------------------------ |
+| b         | 1            | int8     | The signed char          |
+| B         | 1            | uint8    | The unsigned char        |
+| h         | 2            | int16    | The signed short         |
+| H         | 2            | uint16   | The unsigned short       |
+| i         | 4            | int32    | The signed int           |
+| I         | 4            | uint32   | The unsigned int         |
+| q         | 8            | int64    | The signed long          |
+| Q         | 8            | uint64   | The unsigned long        |
+| s         | variable     | string   | Null-terminated string   |
 
 ### Byte Order Prefixes
 
@@ -87,6 +88,38 @@ $ printf '\x01\x02\x03\x04' | bq '4B' -p
 Name       Code   Type                    Value                  Hex
 --------------------------------------------------------------------
 0          B      uint8                                [01 02 03 04]
+```
+
+### Strings
+
+Use `s` to read null-terminated strings (C-style strings):
+
+```bash
+$ printf 'hello\x00world\x00' | bq 'ss' -p
+Name       Code   Type                    Value                  Hex
+--------------------------------------------------------------------
+0          s      string                  hello     [68 65 6c 6c 6f]
+1          s      string                  world     [77 6f 72 6c 64]
+```
+
+Strings can be mixed with binary data:
+
+```bash
+$ printf '\x01hello\x00\x02\x03' | bq '<BsH | {0 -> version, 1 -> name, 2 -> flags}' -p
+Name       Code   Type                    Value                  Hex
+--------------------------------------------------------------------
+version    B      uint8                       1                 0x01
+name       s      string                  hello     [68 65 6c 6c 6f]
+flags      H      uint16                    770               0x0302
+```
+
+Unicode strings (UTF-8) are also supported:
+
+```bash
+$ printf '你好\x00' | bq 's' -p
+Name       Code   Type                    Value                  Hex
+--------------------------------------------------------------------
+0          s      string                     你好  [e4 bd a0 e5 a5 bd]
 ```
 
 ### Functions
@@ -200,8 +233,8 @@ chunk_length i    int32               218103808           0x0d000000
 
 - [x] `parse(...)` function for explicit parsing
 - [x] Nested objects: `{0 -> a, nested: {1 -> b, 2 -> c}}`
+- [x] String type support (`s`) - null-terminated strings
 - [ ] Write/modify binary data
-- [ ] String type support (`s`)
 - [ ] Float type support (`f`, `d`)
 
 [0]: https://docs.python.org/3.14/library/struct.html

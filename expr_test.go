@@ -307,7 +307,9 @@ func TestFormatHex(t *testing.T) {
 		{"int64", int64(0x0102030405060708), "0x0102030405060708"},
 		{"int64 negative", int64(-1), "0xffffffffffffffff"},
 		{"uint64", uint64(0xFFFFFFFFFFFFFFFF), "0xffffffffffffffff"},
-		{"unknown type", "string", "N/A"},
+		{"string", "hello", "[68 65 6c 6c 6f]"},
+		{"string empty", "", "[]"},
+		{"unknown type", struct{}{}, "N/A"},
 	}
 
 	for _, tt := range tests {
@@ -788,7 +790,8 @@ func TestInferTypeInfo(t *testing.T) {
 		{uint32(0), 'I', "uint32"},
 		{int64(0), 'q', "int64"},
 		{uint64(0), 'Q', "uint64"},
-		{"string", '?', "unknown"},
+		{"hello", 's', "string"},
+		{struct{}{}, '?', "unknown"},
 		// Array types
 		{[]int8{}, 'b', "[]int8"},
 		{[]uint8{}, 'B', "[]uint8"},
@@ -1702,5 +1705,365 @@ func TestDeeplyNestedObject(t *testing.T) {
 	}
 	if level2.Fields[1].Name != "d" || level2.Fields[1].Value != uint64(4) {
 		t.Errorf("Field 'd' = %+v, want uint64(4)", level2.Fields[1])
+	}
+}
+
+// Tests for null-terminated string support
+
+func TestParseWithString(t *testing.T) {
+	tests := []struct {
+		name      string
+		format    string
+		wantCodes []rune
+		wantErr   bool
+	}{
+		{
+			name:      "single string",
+			format:    "s",
+			wantCodes: []rune{'s'},
+		},
+		{
+			name:      "multiple strings",
+			format:    "ss",
+			wantCodes: []rune{'s', 's'},
+		},
+		{
+			name:      "mixed with binary",
+			format:    "<BsH",
+			wantCodes: []rune{'B', 's', 'H'},
+		},
+		{
+			name:      "string at end",
+			format:    "Bs",
+			wantCodes: []rune{'B', 's'},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			expr, err := Parse(tt.format)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Parse() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr {
+				return
+			}
+
+			if len(expr.Formats) != len(tt.wantCodes) {
+				t.Errorf("Parse() formats len = %d, want %d", len(expr.Formats), len(tt.wantCodes))
+				return
+			}
+
+			for i, fc := range expr.Formats {
+				if fc.Code != tt.wantCodes[i] {
+					t.Errorf("Parse() Formats[%d].Code = %c, want %c", i, fc.Code, tt.wantCodes[i])
+				}
+			}
+		})
+	}
+}
+
+func TestReadNullTerminatedString(t *testing.T) {
+	tests := []struct {
+		name    string
+		data    []byte
+		want    string
+		wantErr bool
+	}{
+		{
+			name: "simple string",
+			data: []byte{'h', 'e', 'l', 'l', 'o', 0},
+			want: "hello",
+		},
+		{
+			name:    "empty string",
+			data:    []byte{0},
+			wantErr: true,
+		},
+		{
+			name: "unicode string",
+			data: append([]byte("你好"), 0),
+			want: "你好",
+		},
+		{
+			name: "string with special chars",
+			data: []byte{'h', 'i', ' ', '!', '@', '#', 0},
+			want: "hi !@#",
+		},
+		{
+			name: "no null terminator (EOF)",
+			data: []byte{'h', 'i'},
+			want: "hi",
+		},
+		{
+			name: "string with tab",
+			data: []byte{'h', 'i', '\t', 0},
+			want: "hi\t",
+		},
+		{
+			name: "string with newline",
+			data: []byte{'h', 'i', '\n', 0},
+			want: "hi\n",
+		},
+		// Non-printable character error cases
+		{
+			name:    "non-printable control char 0x01",
+			data:    []byte{'h', 'i', 0x01, 0},
+			wantErr: true,
+		},
+		{
+			name:    "non-printable control char 0x7f (DEL)",
+			data:    []byte{'h', 'i', 0x7f, 0},
+			wantErr: true,
+		},
+		{
+			name:    "non-printable at start",
+			data:    []byte{0x02, 'h', 'i', 0},
+			wantErr: true,
+		},
+		{
+			name:    "non-printable bell char",
+			data:    []byte{'h', 'i', 0x07, 0},
+			wantErr: true,
+		},
+		{
+			name:    "non-printable without null (EOF)",
+			data:    []byte{'h', 0x01},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := readNullTerminatedString(bytes.NewReader(tt.data))
+			if (err != nil) != tt.wantErr {
+				t.Errorf("readNullTerminatedString() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if got != tt.want {
+				t.Errorf("readNullTerminatedString() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestExpr_ReadString(t *testing.T) {
+	tests := []struct {
+		name    string
+		format  string
+		data    []byte
+		want    []any
+		wantErr bool
+	}{
+		{
+			name:   "single string",
+			format: "s",
+			data:   []byte{'h', 'e', 'l', 'l', 'o', 0},
+			want:   []any{"hello"},
+		},
+		{
+			name:   "two strings",
+			format: "ss",
+			data:   []byte{'h', 'i', 0, 'b', 'y', 'e', 0},
+			want:   []any{"hi", "bye"},
+		},
+		{
+			name:   "mixed binary and string",
+			format: "<BsH",
+			data:   []byte{0x01, 'h', 'i', 0, 0x02, 0x03},
+			want:   []any{uint8(1), "hi", uint16(0x0302)},
+		},
+		{
+			name:   "string then binary",
+			format: "sB",
+			data:   []byte{'x', 0, 0xFF},
+			want:   []any{"x", uint8(255)},
+		},
+		{
+			name:    "empty string",
+			format:  "s",
+			data:    []byte{0},
+			wantErr: true,
+		},
+		// Non-printable character error cases
+		{
+			name:    "non-printable character in string",
+			format:  "s",
+			data:    []byte{'h', 'i', 0x01, 0},
+			wantErr: true,
+		},
+		{
+			name:    "non-printable in mixed format bs",
+			format:  "<Bs",
+			data:    []byte{0x01, 'h', 0x02, 0}, // 0x01 byte is valid, 0x02 in string is not
+			wantErr: true,
+		},
+		{
+			name:   "byte with any value followed by valid string",
+			format: "<Bs",
+			data:   []byte{0x01, 'h', 'i', 0}, // 0x01 is just a byte, "hi" is valid string
+			want:   []any{uint8(1), "hi"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			expr, err := Parse(tt.format)
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+
+			got, err := expr.Read(bytes.NewReader(tt.data))
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Read() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr {
+				return
+			}
+
+			if len(got) != len(tt.want) {
+				t.Errorf("Read() len = %v, want %v", len(got), len(tt.want))
+				return
+			}
+
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("Read() [%d] = %v (%T), want %v (%T)", i, got[i], got[i], tt.want[i], tt.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestParseExpressionWithString(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{
+			name:    "simple string",
+			input:   "s",
+			wantErr: false,
+		},
+		{
+			name:    "string with pipe",
+			input:   "Bs | {0 -> version, 1 -> name}",
+			wantErr: false,
+		},
+		{
+			name:    "multiple strings with object",
+			input:   "ss | {0 -> first, 1 -> second}",
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, err := ParseExpression(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseExpression() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && node == nil {
+				t.Errorf("ParseExpression() returned nil node without error")
+			}
+		})
+	}
+}
+
+func TestStringPipeEval(t *testing.T) {
+	// Test string with pipe to object
+	data := []byte{0x01, 'h', 'e', 'l', 'l', 'o', 0, 0x02, 0x03}
+
+	node, err := ParseExpression("<BsH | {0 -> version, 1 -> name, 2 -> flags}")
+	if err != nil {
+		t.Fatalf("ParseExpression() error = %v", err)
+	}
+
+	result, err := node.Eval(bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Eval() error = %v", err)
+	}
+
+	obj, ok := result.(*Object)
+	if !ok {
+		t.Fatalf("Eval() returned %T, want *Object", result)
+	}
+
+	if len(obj.Fields) != 3 {
+		t.Fatalf("Fields len = %d, want 3", len(obj.Fields))
+	}
+
+	// Check version field
+	if obj.Fields[0].Name != "version" || obj.Fields[0].Value != uint8(1) {
+		t.Errorf("Fields[0] = %+v, want {version, 1}", obj.Fields[0])
+	}
+
+	// Check name field (string)
+	if obj.Fields[1].Name != "name" || obj.Fields[1].Value != "hello" {
+		t.Errorf("Fields[1] = %+v, want {name, hello}", obj.Fields[1])
+	}
+
+	// Check flags field
+	if obj.Fields[2].Name != "flags" || obj.Fields[2].Value != uint16(0x0302) {
+		t.Errorf("Fields[2] = %+v, want {flags, 770}", obj.Fields[2])
+	}
+}
+
+func TestPrettyPrintString(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		data     []byte
+		contains []string
+	}{
+		{
+			name:  "single string",
+			input: "s",
+			data:  []byte{'h', 'i', 0},
+			contains: []string{
+				"Name", "Code", "Type", "Value", "Hex",
+				"0", "s", "string", "hi", "68 69",
+			},
+		},
+		{
+			name:  "string with binary",
+			input: "<BsH | {0 -> ver, 1 -> name, 2 -> id}",
+			data:  []byte{0x01, 'a', 'b', 0, 0x02, 0x00},
+			contains: []string{
+				"ver", "B", "uint8", "1",
+				"name", "s", "string", "ab", "61 62",
+				"id", "H", "uint16", "2",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, err := ParseExpression(tt.input)
+			if err != nil {
+				t.Fatalf("ParseExpression() error = %v", err)
+			}
+
+			result, err := node.Eval(bytes.NewReader(tt.data), nil)
+			if err != nil {
+				t.Fatalf("Eval() error = %v", err)
+			}
+
+			var buf bytes.Buffer
+			if err := PrettyPrintResult(&buf, node, result); err != nil {
+				t.Fatalf("PrettyPrintResult() error = %v", err)
+			}
+
+			output := buf.String()
+			for _, want := range tt.contains {
+				if !bytes.Contains([]byte(output), []byte(want)) {
+					t.Errorf("PrettyPrintResult() output missing %q\nGot:\n%s", want, output)
+				}
+			}
+		})
 	}
 }
