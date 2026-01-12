@@ -10,6 +10,87 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// Node is the interface for all AST nodes in the expression tree.
+type Node interface {
+	// Eval evaluates the node with the given input values and reader.
+	// For format nodes, it reads from the reader.
+	// For object nodes, it transforms the input values.
+	Eval(r io.Reader, values []any) (any, error)
+}
+
+// FormatNode represents binary format parsing (wraps existing Expr logic).
+type FormatNode struct {
+	*Expr
+}
+
+// Eval reads binary data from the reader according to the format codes.
+func (n *FormatNode) Eval(r io.Reader, _ []any) (any, error) {
+	return n.Read(r)
+}
+
+// PipeNode chains two nodes together, passing output from left to right.
+type PipeNode struct {
+	Left  Node // produces []any
+	Right Node // consumes []any
+}
+
+// Eval evaluates the left node, then passes its result to the right node.
+func (n *PipeNode) Eval(r io.Reader, values []any) (any, error) {
+	leftResult, err := n.Left.Eval(r, values)
+	if err != nil {
+		return nil, err
+	}
+
+	// Left result should be []any for piping to right
+	leftValues, ok := leftResult.([]any)
+	if !ok {
+		return nil, fmt.Errorf("pipe left side must produce []any, got %T", leftResult)
+	}
+
+	return n.Right.Eval(r, leftValues)
+}
+
+// FieldDef defines a single field in an object with index mapping.
+type FieldDef struct {
+	Index int    // index into the input values
+	Name  string // field name in the output object
+}
+
+// ObjectNode creates named fields from indexed values.
+type ObjectNode struct {
+	Fields []FieldDef // ordered list of field definitions
+}
+
+// Eval transforms the input values into an Object with named fields.
+func (n *ObjectNode) Eval(_ io.Reader, values []any) (any, error) {
+	obj := &Object{
+		Fields: make([]ObjectField, 0, len(n.Fields)),
+	}
+
+	for _, fd := range n.Fields {
+		if fd.Index < 0 || fd.Index >= len(values) {
+			return nil, fmt.Errorf("field %q: index %d out of range (have %d values)", fd.Name, fd.Index, len(values))
+		}
+		obj.Fields = append(obj.Fields, ObjectField{
+			Name:  fd.Name,
+			Value: values[fd.Index],
+		})
+	}
+
+	return obj, nil
+}
+
+// ObjectField represents a single field in an Object result.
+type ObjectField struct {
+	Name  string // field name
+	Value any    // field value
+}
+
+// Object represents the result of object construction.
+type Object struct {
+	Fields []ObjectField
+}
+
 // ByteOrder represents the byte order (endianness) for reading binary data.
 type ByteOrder int
 
