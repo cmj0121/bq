@@ -605,23 +605,23 @@ func (fc *FormatCode) decode(buf []byte, order binary.ByteOrder) (any, error) {
 
 // Execute parses the expression, reads from the reader, and outputs the result.
 func Execute(format string, r io.Reader, pretty bool) error {
-	expr, err := Parse(format)
+	node, err := ParseExpression(format)
 	if err != nil {
 		log.Error().Err(err).Msg("failed to parse expression")
 		return err
 	}
 
-	values, err := expr.Read(r)
+	result, err := node.Eval(r, nil)
 	if err != nil {
-		log.Error().Err(err).Msg("failed to read binary data")
+		log.Error().Err(err).Msg("failed to evaluate expression")
 		return err
 	}
 
 	if pretty {
-		return PrettyPrint(os.Stdout, expr, values)
+		return PrettyPrintResult(os.Stdout, node, result)
 	}
 
-	log.Info().Any("values", values).Msg("parsed binary data")
+	log.Info().Any("result", result).Msg("evaluated expression")
 	return nil
 }
 
@@ -669,5 +669,91 @@ func formatHex(val any) string {
 		return fmt.Sprintf("0x%016x", v)
 	default:
 		return "N/A"
+	}
+}
+
+// PrettyPrintResult outputs any evaluation result in a human-readable format.
+// It handles both []any (from FormatNode) and *Object (from ObjectNode).
+func PrettyPrintResult(w io.Writer, node Node, result any) error {
+	// Print header
+	if _, err := fmt.Fprintf(w, "%-10s %-6s %-8s %20s %20s\n", "Name", "Code", "Type", "Value", "Hex"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "%s\n", "--------------------------------------------------------------------"); err != nil {
+		return err
+	}
+
+	switch r := result.(type) {
+	case []any:
+		// Result from FormatNode - use indices as names
+		formatNode, ok := extractFormatNode(node)
+		if ok {
+			for i, val := range r {
+				fc := formatNode.Formats[i]
+				typeName := formatCodeTypeName[fc.Code]
+				hexStr := formatHex(val)
+				if _, err := fmt.Fprintf(w, "%-10d %-6c %-8s %20v %20s\n", i, fc.Code, typeName, val, hexStr); err != nil {
+					return err
+				}
+			}
+		} else {
+			// Fallback if no format info available
+			for i, val := range r {
+				code, typeName := inferTypeInfo(val)
+				hexStr := formatHex(val)
+				if _, err := fmt.Fprintf(w, "%-10d %-6c %-8s %20v %20s\n", i, code, typeName, val, hexStr); err != nil {
+					return err
+				}
+			}
+		}
+	case *Object:
+		// Result from ObjectNode - use field names
+		for _, field := range r.Fields {
+			code, typeName := inferTypeInfo(field.Value)
+			hexStr := formatHex(field.Value)
+			if _, err := fmt.Fprintf(w, "%-10s %-6c %-8s %20v %20s\n", field.Name, code, typeName, field.Value, hexStr); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("unsupported result type: %T", result)
+	}
+
+	return nil
+}
+
+// extractFormatNode extracts the FormatNode from a node tree (handles PipeNode).
+func extractFormatNode(node Node) (*Expr, bool) {
+	switch n := node.(type) {
+	case *FormatNode:
+		return n.Expr, true
+	case *PipeNode:
+		return extractFormatNode(n.Left)
+	default:
+		return nil, false
+	}
+}
+
+// inferTypeInfo infers the format code and type name from a value's Go type.
+func inferTypeInfo(val any) (rune, string) {
+	switch val.(type) {
+	case int8:
+		return 'b', "int8"
+	case uint8:
+		return 'B', "uint8"
+	case int16:
+		return 'h', "int16"
+	case uint16:
+		return 'H', "uint16"
+	case int32:
+		return 'i', "int32"
+	case uint32:
+		return 'I', "uint32"
+	case int64:
+		return 'q', "int64"
+	case uint64:
+		return 'Q', "uint64"
+	default:
+		return '?', "unknown"
 	}
 }
