@@ -642,6 +642,7 @@ type Expr struct {
 }
 
 // formatCodeInfo holds the size and signedness for each format code.
+// Size of 0 indicates variable-length type (e.g., null-terminated string).
 var formatCodeInfo = map[rune]struct {
 	size   int
 	signed bool
@@ -654,6 +655,7 @@ var formatCodeInfo = map[rune]struct {
 	'I': {4, false}, // unsigned int
 	'q': {8, true},  // signed long
 	'Q': {8, false}, // unsigned long
+	's': {0, false}, // null-terminated string (variable length)
 }
 
 // formatCodeTypeName returns the human-readable type name for each format code.
@@ -666,6 +668,7 @@ var formatCodeTypeName = map[rune]string{
 	'I': "uint32",
 	'q': "int64",
 	'Q': "uint64",
+	's': "string",
 }
 
 // Parse parses a format string and returns an Expr.
@@ -757,6 +760,16 @@ func (e *Expr) Read(r io.Reader) ([]any, error) {
 			count = 1 // default for backward compatibility
 		}
 
+		// Handle null-terminated string specially
+		if fc.Code == 's' {
+			str, err := readNullTerminatedString(r)
+			if err != nil {
+				return nil, fmt.Errorf("failed to read null-terminated string: %w", err)
+			}
+			values = append(values, str)
+			continue
+		}
+
 		if count == 1 {
 			// Single value
 			buf := make([]byte, fc.Size)
@@ -779,6 +792,33 @@ func (e *Expr) Read(r io.Reader) ([]any, error) {
 	}
 
 	return values, nil
+}
+
+// readNullTerminatedString reads bytes from the reader until a null byte (0x00) is found.
+// Returns the string without the null terminator.
+func readNullTerminatedString(r io.Reader) (string, error) {
+	var buf []byte
+	b := make([]byte, 1)
+
+	for {
+		_, err := io.ReadFull(r, b)
+		if err != nil {
+			if err == io.EOF {
+				// Return what we have if EOF before null terminator
+				return string(buf), nil
+			}
+			return "", err
+		}
+
+		if b[0] == 0 {
+			// Found null terminator
+			break
+		}
+
+		buf = append(buf, b[0])
+	}
+
+	return string(buf), nil
 }
 
 // decodeArray reads count elements and returns a typed slice.
@@ -950,6 +990,9 @@ func formatHex(val any) string {
 		return fmt.Sprintf("0x%016x", uint64(v))
 	case uint64:
 		return fmt.Sprintf("0x%016x", v)
+	case string:
+		// Format string as hex bytes
+		return formatHexArray([]byte(v), func(x byte) string { return fmt.Sprintf("%02x", x) })
 	// Array types
 	case []int8:
 		return formatHexArray(v, func(x int8) string { return fmt.Sprintf("%02x", uint8(x)) })
@@ -1128,6 +1171,8 @@ func inferTypeInfo(val any) (rune, string) {
 		return 'q', "[]int64"
 	case []uint64:
 		return 'Q', "[]uint64"
+	case string:
+		return 's', "string"
 	default:
 		return '?', "unknown"
 	}
