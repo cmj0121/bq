@@ -96,16 +96,16 @@ type Object struct {
 type TokenType int
 
 const (
-	TokenEOF     TokenType = iota // end of input
-	TokenPipe                     // |
-	TokenLBrace                   // {
-	TokenRBrace                   // }
-	TokenArrow                    // ->
-	TokenComma                    // ,
-	TokenNumber                   // integer literal (for index)
-	TokenIdent                    // identifier (for field name)
-	TokenFormat                   // format code (b, B, h, H, i, I, q, Q)
-	TokenOrder                    // byte order prefix (<, >, @)
+	TokenEOF    TokenType = iota // end of input
+	TokenPipe                    // |
+	TokenLBrace                  // {
+	TokenRBrace                  // }
+	TokenArrow                   // ->
+	TokenComma                   // ,
+	TokenNumber                  // integer literal (for index)
+	TokenIdent                   // identifier (for field name)
+	TokenFormat                  // format code (b, B, h, H, i, I, q, Q)
+	TokenOrder                   // byte order prefix (<, >, @)
 )
 
 // Token represents a single token in the expression.
@@ -170,10 +170,24 @@ func (t *Tokenizer) Next() (Token, error) {
 		return t.scanNumber(startPos)
 	}
 
-	// Format codes (single character)
+	// Format codes (single character) - only if not followed by non-format-code alphanumeric chars
+	// This distinguishes format codes like 'b' from identifiers like 'bar'
+	// Examples: 'bH' -> two format codes, 'bar' -> identifier
 	if _, ok := formatCodeInfo[ch]; ok {
-		t.pos++
-		return Token{Type: TokenFormat, Value: string(ch), Pos: startPos}, nil
+		nextPos := t.pos + 1
+		if nextPos >= len(t.input) {
+			// End of input - it's a format code
+			t.pos++
+			return Token{Type: TokenFormat, Value: string(ch), Pos: startPos}, nil
+		}
+		nextCh := t.input[nextPos]
+		// If next char is also a format code or not alphanumeric, treat current as format code
+		// Otherwise, treat as start of identifier
+		_, nextIsFormat := formatCodeInfo[nextCh]
+		if !isAlphanumeric(nextCh) || nextIsFormat {
+			t.pos++
+			return Token{Type: TokenFormat, Value: string(ch), Pos: startPos}, nil
+		}
 	}
 
 	// Identifier (for field names)
@@ -225,6 +239,10 @@ func isDigit(ch rune) bool {
 
 func isLetter(ch rune) bool {
 	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+}
+
+func isAlphanumeric(ch rune) bool {
+	return isLetter(ch) || isDigit(ch) || ch == '_'
 }
 
 // Parser uses the tokenizer to build an AST from an expression string.
