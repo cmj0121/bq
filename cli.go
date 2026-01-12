@@ -74,6 +74,10 @@ func (a *Args) epilogue() {
 func (a *Args) run() error {
 	log.Debug().Any("args", a).Msg("running ...")
 
-	log.Info().Msg("running bq ...")
-	return nil
+	if a.Expr == nil {
+		log.Info().Msg("no expression provided, nothing to do")
+		return nil
+	}
+
+	return Execute(*a.Expr, a.File)
 }
