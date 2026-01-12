@@ -91,6 +91,141 @@ type Object struct {
 	Fields []ObjectField
 }
 
+// TokenType represents the type of a token in the expression.
+type TokenType int
+
+const (
+	TokenEOF     TokenType = iota // end of input
+	TokenPipe                     // |
+	TokenLBrace                   // {
+	TokenRBrace                   // }
+	TokenArrow                    // ->
+	TokenComma                    // ,
+	TokenNumber                   // integer literal (for index)
+	TokenIdent                    // identifier (for field name)
+	TokenFormat                   // format code (b, B, h, H, i, I, q, Q)
+	TokenOrder                    // byte order prefix (<, >, @)
+)
+
+// Token represents a single token in the expression.
+type Token struct {
+	Type  TokenType
+	Value string // the literal value of the token
+	Pos   int    // position in the input string
+}
+
+// Tokenizer breaks an expression string into tokens.
+type Tokenizer struct {
+	input []rune
+	pos   int
+}
+
+// NewTokenizer creates a new tokenizer for the given input.
+func NewTokenizer(input string) *Tokenizer {
+	return &Tokenizer{
+		input: []rune(input),
+		pos:   0,
+	}
+}
+
+// Next returns the next token from the input.
+func (t *Tokenizer) Next() (Token, error) {
+	t.skipWhitespace()
+
+	if t.pos >= len(t.input) {
+		return Token{Type: TokenEOF, Pos: t.pos}, nil
+	}
+
+	startPos := t.pos
+	ch := t.input[t.pos]
+
+	// Single character tokens
+	switch ch {
+	case '|':
+		t.pos++
+		return Token{Type: TokenPipe, Value: "|", Pos: startPos}, nil
+	case '{':
+		t.pos++
+		return Token{Type: TokenLBrace, Value: "{", Pos: startPos}, nil
+	case '}':
+		t.pos++
+		return Token{Type: TokenRBrace, Value: "}", Pos: startPos}, nil
+	case ',':
+		t.pos++
+		return Token{Type: TokenComma, Value: ",", Pos: startPos}, nil
+	case '<', '>', '@':
+		t.pos++
+		return Token{Type: TokenOrder, Value: string(ch), Pos: startPos}, nil
+	}
+
+	// Arrow operator ->
+	if ch == '-' && t.pos+1 < len(t.input) && t.input[t.pos+1] == '>' {
+		t.pos += 2
+		return Token{Type: TokenArrow, Value: "->", Pos: startPos}, nil
+	}
+
+	// Number (for index)
+	if isDigit(ch) {
+		return t.scanNumber(startPos)
+	}
+
+	// Format codes (single character)
+	if _, ok := formatCodeInfo[ch]; ok {
+		t.pos++
+		return Token{Type: TokenFormat, Value: string(ch), Pos: startPos}, nil
+	}
+
+	// Identifier (for field names)
+	if isLetter(ch) || ch == '_' {
+		return t.scanIdent(startPos)
+	}
+
+	return Token{}, fmt.Errorf("unexpected character %q at position %d", ch, startPos)
+}
+
+// Peek returns the next token without consuming it.
+func (t *Tokenizer) Peek() (Token, error) {
+	savedPos := t.pos
+	tok, err := t.Next()
+	t.pos = savedPos
+	return tok, err
+}
+
+// skipWhitespace advances past any whitespace characters.
+func (t *Tokenizer) skipWhitespace() {
+	for t.pos < len(t.input) && isWhitespace(t.input[t.pos]) {
+		t.pos++
+	}
+}
+
+// scanNumber scans a number token.
+func (t *Tokenizer) scanNumber(startPos int) (Token, error) {
+	for t.pos < len(t.input) && isDigit(t.input[t.pos]) {
+		t.pos++
+	}
+	return Token{Type: TokenNumber, Value: string(t.input[startPos:t.pos]), Pos: startPos}, nil
+}
+
+// scanIdent scans an identifier token.
+func (t *Tokenizer) scanIdent(startPos int) (Token, error) {
+	for t.pos < len(t.input) && (isLetter(t.input[t.pos]) || isDigit(t.input[t.pos]) || t.input[t.pos] == '_') {
+		t.pos++
+	}
+	return Token{Type: TokenIdent, Value: string(t.input[startPos:t.pos]), Pos: startPos}, nil
+}
+
+func isWhitespace(ch rune) bool {
+	return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
+}
+
+func isDigit(ch rune) bool {
+	return ch >= '0' && ch <= '9'
+}
+
+func isLetter(ch rune) bool {
+	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
+}
+
 // ByteOrder represents the byte order (endianness) for reading binary data.
 type ByteOrder int
 
