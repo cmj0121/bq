@@ -233,3 +233,89 @@ func TestFormatCodeSize(t *testing.T) {
 		})
 	}
 }
+
+func TestPrettyPrint(t *testing.T) {
+	tests := []struct {
+		name     string
+		format   string
+		data     []byte
+		contains []string
+	}{
+		{
+			name:   "single signed char",
+			format: "<b",
+			data:   []byte{0xFF},
+			contains: []string{
+				"Index", "Code", "Type", "Value", "Hex",
+				"0", "b", "int8", "-1", "0xff",
+			},
+		},
+		{
+			name:   "multiple formats",
+			format: "<bBh",
+			data:   []byte{0x01, 0x02, 0x03, 0x04},
+			contains: []string{
+				"0", "b", "int8", "1", "0x01",
+				"1", "B", "uint8", "2", "0x02",
+				"2", "h", "int16", "1027", "0x0403",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			expr, err := Parse(tt.format)
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+
+			values, err := expr.Read(bytes.NewReader(tt.data))
+			if err != nil {
+				t.Fatalf("Read() error = %v", err)
+			}
+
+			var buf bytes.Buffer
+			if err := PrettyPrint(&buf, expr, values); err != nil {
+				t.Fatalf("PrettyPrint() error = %v", err)
+			}
+
+			output := buf.String()
+			for _, want := range tt.contains {
+				if !bytes.Contains([]byte(output), []byte(want)) {
+					t.Errorf("PrettyPrint() output missing %q\nGot:\n%s", want, output)
+				}
+			}
+		})
+	}
+}
+
+func TestFormatHex(t *testing.T) {
+	tests := []struct {
+		name string
+		val  any
+		want string
+	}{
+		{"int8 positive", int8(1), "0x01"},
+		{"int8 negative", int8(-1), "0xff"},
+		{"uint8", uint8(255), "0xff"},
+		{"int16", int16(0x0102), "0x0102"},
+		{"int16 negative", int16(-1), "0xffff"},
+		{"uint16", uint16(0xFFFF), "0xffff"},
+		{"int32", int32(0x01020304), "0x01020304"},
+		{"int32 negative", int32(-1), "0xffffffff"},
+		{"uint32", uint32(0xFFFFFFFF), "0xffffffff"},
+		{"int64", int64(0x0102030405060708), "0x0102030405060708"},
+		{"int64 negative", int64(-1), "0xffffffffffffffff"},
+		{"uint64", uint64(0xFFFFFFFFFFFFFFFF), "0xffffffffffffffff"},
+		{"unknown type", "string", "N/A"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := formatHex(tt.val)
+			if got != tt.want {
+				t.Errorf("formatHex() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
