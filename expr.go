@@ -824,8 +824,11 @@ func readNullTerminatedString(r io.Reader) (string, error) {
 }
 
 // validatePrintableString checks if all runes in the byte slice are printable.
-// Returns an error if any non-printable character is found.
+// Returns an error if the string is empty or contains non-printable characters.
 func validatePrintableString(buf []byte) (string, error) {
+	if len(buf) == 0 {
+		return "", fmt.Errorf("empty string: must contain at least 1 character")
+	}
 	s := string(buf)
 	for i, r := range s {
 		if !unicode.IsPrint(r) && !unicode.IsSpace(r) {
