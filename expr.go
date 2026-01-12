@@ -52,10 +52,11 @@ func (n *PipeNode) Eval(r io.Reader, values []any) (any, error) {
 	return n.Right.Eval(r, leftValues)
 }
 
-// FieldDef defines a single field in an object with index mapping.
+// FieldDef defines a single field in an object with index mapping or nested object.
 type FieldDef struct {
-	Index int    // index into the input values
-	Name  string // field name in the output object
+	Index  int         // index into the input values (ignored if Nested is set)
+	Name   string      // field name in the output object
+	Nested *ObjectNode // nested object definition (nil for regular index field)
 }
 
 // ObjectNode creates named fields from indexed values.
@@ -70,13 +71,26 @@ func (n *ObjectNode) Eval(_ io.Reader, values []any) (any, error) {
 	}
 
 	for _, fd := range n.Fields {
-		if fd.Index < 0 || fd.Index >= len(values) {
-			return nil, fmt.Errorf("field %q: index %d out of range (have %d values)", fd.Name, fd.Index, len(values))
+		if fd.Nested != nil {
+			// Nested object: recursively evaluate
+			nestedResult, err := fd.Nested.Eval(nil, values)
+			if err != nil {
+				return nil, fmt.Errorf("nested field %q: %w", fd.Name, err)
+			}
+			obj.Fields = append(obj.Fields, ObjectField{
+				Name:  fd.Name,
+				Value: nestedResult,
+			})
+		} else {
+			// Regular index field
+			if fd.Index < 0 || fd.Index >= len(values) {
+				return nil, fmt.Errorf("field %q: index %d out of range (have %d values)", fd.Name, fd.Index, len(values))
+			}
+			obj.Fields = append(obj.Fields, ObjectField{
+				Name:  fd.Name,
+				Value: values[fd.Index],
+			})
 		}
-		obj.Fields = append(obj.Fields, ObjectField{
-			Name:  fd.Name,
-			Value: values[fd.Index],
-		})
 	}
 
 	return obj, nil
@@ -103,6 +117,7 @@ const (
 	TokenRBrace                  // }
 	TokenLParen                  // (
 	TokenRParen                  // )
+	TokenColon                   // :
 	TokenArrow                   // ->
 	TokenComma                   // ,
 	TokenNumber                  // integer literal (for index)
@@ -160,6 +175,9 @@ func (t *Tokenizer) Next() (Token, error) {
 	case ')':
 		t.pos++
 		return Token{Type: TokenRParen, Value: ")", Pos: startPos}, nil
+	case ':':
+		t.pos++
+		return Token{Type: TokenColon, Value: ":", Pos: startPos}, nil
 	case ',':
 		t.pos++
 		return Token{Type: TokenComma, Value: ",", Pos: startPos}, nil
@@ -276,8 +294,10 @@ func NewParser(input string) *Parser {
 //	FunctionCall→ IDENT '(' FormatExpr ')'
 //	FormatExpr  → ByteOrder? (Count? FormatCode)+
 //	Object      → '{' FieldList '}'
-//	FieldList   → FieldDef (',' FieldDef)*
-//	FieldDef    → NUMBER '->' IDENTIFIER
+//	FieldList   → FieldItem (',' FieldItem)*
+//	FieldItem   → IndexField | NestedField
+//	IndexField  → NUMBER '->' IDENTIFIER
+//	NestedField → IDENTIFIER ':' Object
 func ParseExpression(input string) (Node, error) {
 	p := NewParser(input)
 	if err := p.advance(); err != nil {
@@ -471,12 +491,12 @@ func (p *Parser) parseObject() (Node, error) {
 	return &ObjectNode{Fields: fields}, nil
 }
 
-// parseFieldList parses: FieldDef (',' FieldDef)*
+// parseFieldList parses: FieldItem (',' FieldItem)*
 func (p *Parser) parseFieldList() ([]FieldDef, error) {
 	fields := make([]FieldDef, 0)
 
 	// Parse first field
-	fd, err := p.parseFieldDef()
+	fd, err := p.parseFieldItem()
 	if err != nil {
 		return nil, err
 	}
@@ -487,7 +507,7 @@ func (p *Parser) parseFieldList() ([]FieldDef, error) {
 		if err := p.advance(); err != nil {
 			return nil, err
 		}
-		fd, err := p.parseFieldDef()
+		fd, err := p.parseFieldItem()
 		if err != nil {
 			return nil, err
 		}
@@ -497,8 +517,31 @@ func (p *Parser) parseFieldList() ([]FieldDef, error) {
 	return fields, nil
 }
 
-// parseFieldDef parses: NUMBER '->' IDENTIFIER
-func (p *Parser) parseFieldDef() (FieldDef, error) {
+// parseFieldItem parses: IndexField | NestedField
+// IndexField  → NUMBER '->' IDENTIFIER
+// NestedField → IDENTIFIER ':' Object
+// Note: Nested field names can also be format code characters.
+func (p *Parser) parseFieldItem() (FieldDef, error) {
+	// Check if it's a nested field (starts with identifier or format code followed by ':')
+	if p.current.Type == TokenIdent || p.current.Type == TokenFormat {
+		// Peek to see if next token is ':'
+		nextTok, err := p.tokenizer.Peek()
+		if err != nil {
+			return FieldDef{}, err
+		}
+		if nextTok.Type == TokenColon {
+			return p.parseNestedField()
+		}
+	}
+
+	// Otherwise it's an index field
+	return p.parseIndexField()
+}
+
+// parseIndexField parses: NUMBER '->' IDENTIFIER
+// Note: Field names can also be format code characters (b, B, h, H, i, I, q, Q),
+// which the tokenizer may classify as TokenFormat instead of TokenIdent.
+func (p *Parser) parseIndexField() (FieldDef, error) {
 	if p.current.Type != TokenNumber {
 		return FieldDef{}, fmt.Errorf("expected index number at position %d, got %q", p.current.Pos, p.current.Value)
 	}
@@ -518,7 +561,9 @@ func (p *Parser) parseFieldDef() (FieldDef, error) {
 		return FieldDef{}, err
 	}
 
-	if p.current.Type != TokenIdent {
+	// Accept both TokenIdent and TokenFormat as field names
+	// (format code characters like 'b', 'H' can be valid field names)
+	if p.current.Type != TokenIdent && p.current.Type != TokenFormat {
 		return FieldDef{}, fmt.Errorf("expected field name at position %d, got %q", p.current.Pos, p.current.Value)
 	}
 
@@ -528,6 +573,40 @@ func (p *Parser) parseFieldDef() (FieldDef, error) {
 	}
 
 	return FieldDef{Index: index, Name: name}, nil
+}
+
+// parseNestedField parses: IDENTIFIER ':' Object
+// Note: Nested field names can also be format code characters.
+func (p *Parser) parseNestedField() (FieldDef, error) {
+	// Accept both TokenIdent and TokenFormat as nested field names
+	if p.current.Type != TokenIdent && p.current.Type != TokenFormat {
+		return FieldDef{}, fmt.Errorf("expected nested field name at position %d, got %q", p.current.Pos, p.current.Value)
+	}
+
+	name := p.current.Value
+	if err := p.advance(); err != nil {
+		return FieldDef{}, err
+	}
+
+	if p.current.Type != TokenColon {
+		return FieldDef{}, fmt.Errorf("expected ':' at position %d, got %q", p.current.Pos, p.current.Value)
+	}
+	if err := p.advance(); err != nil {
+		return FieldDef{}, err
+	}
+
+	// Parse the nested object
+	nestedNode, err := p.parseObject()
+	if err != nil {
+		return FieldDef{}, err
+	}
+
+	nested, ok := nestedNode.(*ObjectNode)
+	if !ok {
+		return FieldDef{}, fmt.Errorf("expected object for nested field %q", name)
+	}
+
+	return FieldDef{Name: name, Nested: nested}, nil
 }
 
 // ByteOrder represents the byte order (endianness) for reading binary data.
@@ -916,6 +995,13 @@ func PrettyPrintResult(w io.Writer, node Node, result any) error {
 		return err
 	}
 
+	return prettyPrintValue(w, node, result, 0)
+}
+
+// prettyPrintValue recursively prints values with indentation for nested objects.
+func prettyPrintValue(w io.Writer, node Node, result any, indent int) error {
+	indentStr := strings.Repeat("  ", indent)
+
 	switch r := result.(type) {
 	case []any:
 		// Result from FormatNode - use indices as names
@@ -926,7 +1012,8 @@ func PrettyPrintResult(w io.Writer, node Node, result any) error {
 				typeName := formatCodeTypeName[fc.Code]
 				hexStr := formatHex(val)
 				valStr := formatValue(val)
-				if _, err := fmt.Fprintf(w, "%-10d %-6c %-8s %20s %20s\n", i, fc.Code, typeName, valStr, hexStr); err != nil {
+				name := fmt.Sprintf("%s%d", indentStr, i)
+				if _, err := fmt.Fprintf(w, "%-10s %-6c %-8s %20s %20s\n", name, fc.Code, typeName, valStr, hexStr); err != nil {
 					return err
 				}
 			}
@@ -936,7 +1023,8 @@ func PrettyPrintResult(w io.Writer, node Node, result any) error {
 				code, typeName := inferTypeInfo(val)
 				hexStr := formatHex(val)
 				valStr := formatValue(val)
-				if _, err := fmt.Fprintf(w, "%-10d %-6c %-8s %20s %20s\n", i, code, typeName, valStr, hexStr); err != nil {
+				name := fmt.Sprintf("%s%d", indentStr, i)
+				if _, err := fmt.Fprintf(w, "%-10s %-6c %-8s %20s %20s\n", name, code, typeName, valStr, hexStr); err != nil {
 					return err
 				}
 			}
@@ -944,11 +1032,25 @@ func PrettyPrintResult(w io.Writer, node Node, result any) error {
 	case *Object:
 		// Result from ObjectNode - use field names
 		for _, field := range r.Fields {
-			code, typeName := inferTypeInfo(field.Value)
-			hexStr := formatHex(field.Value)
-			valStr := formatValue(field.Value)
-			if _, err := fmt.Fprintf(w, "%-10s %-6c %-8s %20s %20s\n", field.Name, code, typeName, valStr, hexStr); err != nil {
-				return err
+			// Check if field value is a nested object
+			if nestedObj, ok := field.Value.(*Object); ok {
+				// Print nested object header
+				name := fmt.Sprintf("%s%s", indentStr, field.Name)
+				if _, err := fmt.Fprintf(w, "%-10s %-6s %-8s %20s %20s\n", name, "-", "object", "", ""); err != nil {
+					return err
+				}
+				// Recursively print nested fields
+				if err := prettyPrintValue(w, nil, nestedObj, indent+1); err != nil {
+					return err
+				}
+			} else {
+				code, typeName := inferTypeInfo(field.Value)
+				hexStr := formatHex(field.Value)
+				valStr := formatValue(field.Value)
+				name := fmt.Sprintf("%s%s", indentStr, field.Name)
+				if _, err := fmt.Fprintf(w, "%-10s %-6c %-8s %20s %20s\n", name, code, typeName, valStr, hexStr); err != nil {
+					return err
+				}
 			}
 		}
 	default:
