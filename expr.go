@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode"
 	"unsafe"
 
 	"github.com/rs/zerolog/log"
@@ -796,6 +797,7 @@ func (e *Expr) Read(r io.Reader) ([]any, error) {
 
 // readNullTerminatedString reads bytes from the reader until a null byte (0x00) is found.
 // Returns the string without the null terminator.
+// Returns an error if any non-printable character is encountered.
 func readNullTerminatedString(r io.Reader) (string, error) {
 	var buf []byte
 	b := make([]byte, 1)
@@ -804,8 +806,8 @@ func readNullTerminatedString(r io.Reader) (string, error) {
 		_, err := io.ReadFull(r, b)
 		if err != nil {
 			if err == io.EOF {
-				// Return what we have if EOF before null terminator
-				return string(buf), nil
+				// Validate and return what we have if EOF before null terminator
+				return validatePrintableString(buf)
 			}
 			return "", err
 		}
@@ -818,7 +820,19 @@ func readNullTerminatedString(r io.Reader) (string, error) {
 		buf = append(buf, b[0])
 	}
 
-	return string(buf), nil
+	return validatePrintableString(buf)
+}
+
+// validatePrintableString checks if all runes in the byte slice are printable.
+// Returns an error if any non-printable character is found.
+func validatePrintableString(buf []byte) (string, error) {
+	s := string(buf)
+	for i, r := range s {
+		if !unicode.IsPrint(r) && !unicode.IsSpace(r) {
+			return "", fmt.Errorf("non-printable character at position %d: 0x%02x", i, r)
+		}
+	}
+	return s, nil
 }
 
 // decodeArray reads count elements and returns a typed slice.
