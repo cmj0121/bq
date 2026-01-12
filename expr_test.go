@@ -1777,9 +1777,9 @@ func TestReadNullTerminatedString(t *testing.T) {
 			want: "hello",
 		},
 		{
-			name: "empty string",
-			data: []byte{0},
-			want: "",
+			name:    "empty string",
+			data:    []byte{0},
+			wantErr: true,
 		},
 		{
 			name: "unicode string",
@@ -1881,10 +1881,10 @@ func TestExpr_ReadString(t *testing.T) {
 			want:   []any{"x", uint8(255)},
 		},
 		{
-			name:   "empty string",
-			format: "s",
-			data:   []byte{0},
-			want:   []any{""},
+			name:    "empty string",
+			format:  "s",
+			data:    []byte{0},
+			wantErr: true,
 		},
 		// Non-printable character error cases
 		{
