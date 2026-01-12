@@ -865,7 +865,8 @@ func PrettyPrintResult(w io.Writer, node Node, result any) error {
 				fc := formatNode.Formats[i]
 				typeName := formatCodeTypeName[fc.Code]
 				hexStr := formatHex(val)
-				if _, err := fmt.Fprintf(w, "%-10d %-6c %-8s %20v %20s\n", i, fc.Code, typeName, val, hexStr); err != nil {
+				valStr := formatValue(val)
+				if _, err := fmt.Fprintf(w, "%-10d %-6c %-8s %20s %20s\n", i, fc.Code, typeName, valStr, hexStr); err != nil {
 					return err
 				}
 			}
@@ -874,7 +875,8 @@ func PrettyPrintResult(w io.Writer, node Node, result any) error {
 			for i, val := range r {
 				code, typeName := inferTypeInfo(val)
 				hexStr := formatHex(val)
-				if _, err := fmt.Fprintf(w, "%-10d %-6c %-8s %20v %20s\n", i, code, typeName, val, hexStr); err != nil {
+				valStr := formatValue(val)
+				if _, err := fmt.Fprintf(w, "%-10d %-6c %-8s %20s %20s\n", i, code, typeName, valStr, hexStr); err != nil {
 					return err
 				}
 			}
@@ -884,7 +886,8 @@ func PrettyPrintResult(w io.Writer, node Node, result any) error {
 		for _, field := range r.Fields {
 			code, typeName := inferTypeInfo(field.Value)
 			hexStr := formatHex(field.Value)
-			if _, err := fmt.Fprintf(w, "%-10s %-6c %-8s %20v %20s\n", field.Name, code, typeName, field.Value, hexStr); err != nil {
+			valStr := formatValue(field.Value)
+			if _, err := fmt.Fprintf(w, "%-10s %-6c %-8s %20s %20s\n", field.Name, code, typeName, valStr, hexStr); err != nil {
 				return err
 			}
 		}
@@ -905,6 +908,26 @@ func extractFormatNode(node Node) (*Expr, bool) {
 	default:
 		return nil, false
 	}
+}
+
+// isArrayValue returns true if the value is an array type.
+func isArrayValue(val any) bool {
+	switch val.(type) {
+	case []int8, []uint8, []int16, []uint16, []int32, []uint32, []int64, []uint64:
+		return true
+	default:
+		return false
+	}
+}
+
+// formatValue formats a value for the Value column.
+// For arrays, returns empty string (only Hex is shown).
+// For scalars, returns the value as a string.
+func formatValue(val any) string {
+	if isArrayValue(val) {
+		return ""
+	}
+	return fmt.Sprintf("%v", val)
 }
 
 // inferTypeInfo infers the format code and type name from a value's Go type.

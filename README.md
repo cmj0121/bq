@@ -86,7 +86,7 @@ Use digit prefix to read multiple elements as an array:
 $ printf '\x01\x02\x03\x04' | bq '4B' -p
 Name       Code   Type                    Value                  Hex
 --------------------------------------------------------------------
-0          B      uint8    [1 2 3 4]                       [01 02 03 04]
+0          B      uint8                                [01 02 03 04]
 ```
 
 ### Pipe Operator
@@ -128,8 +128,8 @@ Reading a binary header with magic bytes and a length field:
 $ printf '\x89PNG\x00\x00\x00\x0d' | bq '<4Bi | {0 -> magic, 1 -> chunk_length}' -p
 Name       Code   Type                    Value                  Hex
 --------------------------------------------------------------------
-magic      B      []uint8  [137 80 78 71]                 [89 50 4e 47]
-chunk_length i    int32                      13           0x0000000d
+magic      B      []uint8                              [89 50 4e 47]
+chunk_length i    int32               218103808           0x0d000000
 ```
 
 ## Flags
