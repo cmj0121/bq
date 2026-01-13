@@ -140,6 +140,35 @@ printf '\xff\x01\x02' | bq '<bH' -p
 printf '\xff\x01\x02' | bq 'parse(<bH)' -p
 ```
 
+#### write()
+
+The `write()` function writes binary data to a file:
+
+```text
+<expression> | write("<file_path>")
+```
+
+This enables reading binary data, optionally transforming it, and writing to a new file.
+
+**Examples:**
+
+```bash
+# Read and write binary data to a file
+printf '\xff\x01\x02' | bq '<bH | write("output.bin")'
+
+# Read, transform with object, then write
+printf '\xff\x01\x02' | bq '<bH | {0 -> key, 1 -> value} | write("output.bin")'
+
+# Copy binary data from one file to another
+bq '<4Bi | write("copy.bin")' -f input.bin
+```
+
+The `write()` function:
+
+- Creates a new file or overwrites an existing file
+- Preserves the byte order from the parse expression
+- Supports all format types: scalars, arrays, strings, and objects
+
 ### Pipe Operator
 
 The pipe operator `|` passes parsed values to subsequent operations:
@@ -234,7 +263,7 @@ chunk_length i    int32               218103808           0x0d000000
 - [x] `parse(...)` function for explicit parsing
 - [x] Nested objects: `{0 -> a, nested: {1 -> b, 2 -> c}}`
 - [x] String type support (`s`) - null-terminated strings
-- [ ] Write/modify binary data
+- [x] Write/modify binary data - `write("path")` function
 - [ ] Float type support (`f`, `d`)
 
 [0]: https://docs.python.org/3.14/library/struct.html

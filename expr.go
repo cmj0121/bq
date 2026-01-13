@@ -44,10 +44,26 @@ func (n *PipeNode) Eval(r io.Reader, values []any) (any, error) {
 		return nil, err
 	}
 
-	// Left result should be []any for piping to right
-	leftValues, ok := leftResult.([]any)
-	if !ok {
-		return nil, fmt.Errorf("pipe left side must produce []any, got %T", leftResult)
+	// Left result can be []any or *Object
+	var leftValues []any
+	switch lr := leftResult.(type) {
+	case []any:
+		leftValues = lr
+	case *Object:
+		// Extract values from object for piping
+		leftValues = make([]any, len(lr.Fields))
+		for i, f := range lr.Fields {
+			leftValues[i] = f.Value
+		}
+	default:
+		return nil, fmt.Errorf("pipe left side must produce []any or *Object, got %T", leftResult)
+	}
+
+	// If right is WriteNode, inherit byte order from left FormatNode
+	if writeNode, ok := n.Right.(*WriteNode); ok {
+		if formatExpr, ok := extractFormatNode(n.Left); ok {
+			writeNode.ByteOrder = formatExpr.Order
+		}
 	}
 
 	return n.Right.Eval(r, leftValues)
@@ -108,6 +124,119 @@ type Object struct {
 	Fields []ObjectField
 }
 
+// WriteNode writes binary data to a file.
+type WriteNode struct {
+	Path      string    // output file path
+	ByteOrder ByteOrder // byte order for writing
+}
+
+// Eval writes the input values to the specified file.
+func (n *WriteNode) Eval(_ io.Reader, values []any) (any, error) {
+	// Create or truncate the output file
+	f, err := os.Create(n.Path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create output file %q: %w", n.Path, err)
+	}
+
+	// Encode and write values
+	if err := n.writeValues(f, values); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+
+	// Close and check for errors
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close output file %q: %w", n.Path, err)
+	}
+
+	// Return the values unchanged for potential further processing
+	return values, nil
+}
+
+// writeValues encodes and writes all values to the writer.
+func (n *WriteNode) writeValues(w io.Writer, values []any) error {
+	order := n.binaryOrder()
+	for i, val := range values {
+		if err := encodeValue(w, val, order); err != nil {
+			return fmt.Errorf("failed to encode value at index %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// binaryOrder returns the binary.ByteOrder for this node.
+func (n *WriteNode) binaryOrder() binary.ByteOrder {
+	switch n.ByteOrder {
+	case LittleEndian:
+		return binary.LittleEndian
+	case BigEndian:
+		return binary.BigEndian
+	default:
+		return nativeEndian()
+	}
+}
+
+// encodeValue encodes a single value to binary format.
+func encodeValue(w io.Writer, val any, order binary.ByteOrder) error {
+	switch v := val.(type) {
+	case int8:
+		return binary.Write(w, order, v)
+	case uint8:
+		return binary.Write(w, order, v)
+	case int16:
+		return binary.Write(w, order, v)
+	case uint16:
+		return binary.Write(w, order, v)
+	case int32:
+		return binary.Write(w, order, v)
+	case uint32:
+		return binary.Write(w, order, v)
+	case int64:
+		return binary.Write(w, order, v)
+	case uint64:
+		return binary.Write(w, order, v)
+	case string:
+		// Write null-terminated string
+		if _, err := w.Write([]byte(v)); err != nil {
+			return err
+		}
+		return binary.Write(w, order, byte(0)) // null terminator
+	// Array types
+	case []int8:
+		for _, x := range v {
+			if err := binary.Write(w, order, x); err != nil {
+				return err
+			}
+		}
+		return nil
+	case []uint8:
+		_, err := w.Write(v)
+		return err
+	case []int16:
+		return binary.Write(w, order, v)
+	case []uint16:
+		return binary.Write(w, order, v)
+	case []int32:
+		return binary.Write(w, order, v)
+	case []uint32:
+		return binary.Write(w, order, v)
+	case []int64:
+		return binary.Write(w, order, v)
+	case []uint64:
+		return binary.Write(w, order, v)
+	case *Object:
+		// Encode object fields in order
+		for _, field := range v.Fields {
+			if err := encodeValue(w, field.Value, order); err != nil {
+				return fmt.Errorf("field %q: %w", field.Name, err)
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported type for encoding: %T", val)
+	}
+}
+
 // TokenType represents the type of a token in the expression.
 type TokenType int
 
@@ -125,6 +254,7 @@ const (
 	TokenIdent                   // identifier (for field name or function)
 	TokenFormat                  // format code (b, B, h, H, i, I, q, Q)
 	TokenOrder                   // byte order prefix (<, >, @)
+	TokenString                  // string literal "..."
 )
 
 // Token represents a single token in the expression.
@@ -193,6 +323,11 @@ func (t *Tokenizer) Next() (Token, error) {
 		return Token{Type: TokenArrow, Value: "->", Pos: startPos}, nil
 	}
 
+	// String literal
+	if ch == '"' {
+		return t.scanString(startPos)
+	}
+
 	// Number (for index)
 	if isDigit(ch) {
 		return t.scanNumber(startPos)
@@ -257,6 +392,39 @@ func (t *Tokenizer) scanIdent(startPos int) (Token, error) {
 	return Token{Type: TokenIdent, Value: string(t.input[startPos:t.pos]), Pos: startPos}, nil
 }
 
+// scanString scans a string literal token.
+func (t *Tokenizer) scanString(startPos int) (Token, error) {
+	t.pos++ // skip opening quote
+	var sb strings.Builder
+	for t.pos < len(t.input) {
+		ch := t.input[t.pos]
+		if ch == '"' {
+			t.pos++ // skip closing quote
+			return Token{Type: TokenString, Value: sb.String(), Pos: startPos}, nil
+		}
+		if ch == '\\' && t.pos+1 < len(t.input) {
+			// Handle escape sequences
+			t.pos++
+			switch t.input[t.pos] {
+			case 'n':
+				sb.WriteRune('\n')
+			case 't':
+				sb.WriteRune('\t')
+			case '\\':
+				sb.WriteRune('\\')
+			case '"':
+				sb.WriteRune('"')
+			default:
+				return Token{}, fmt.Errorf("unknown escape sequence \\%c at position %d", t.input[t.pos], t.pos)
+			}
+		} else {
+			sb.WriteRune(ch)
+		}
+		t.pos++
+	}
+	return Token{}, fmt.Errorf("unterminated string literal starting at position %d", startPos)
+}
+
 func isWhitespace(ch rune) bool {
 	return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
 }
@@ -290,9 +458,11 @@ func NewParser(input string) *Parser {
 // Grammar:
 //
 //	Expression  → Pipe
-//	Pipe        → Primary ('|' Object)?
+//	Pipe        → Primary ('|' PipeRHS)*
+//	PipeRHS     → Object | WriteFunc
 //	Primary     → FunctionCall | FormatExpr
 //	FunctionCall→ IDENT '(' FormatExpr ')'
+//	WriteFunc   → 'write' '(' STRING ')'
 //	FormatExpr  → ByteOrder? (Count? FormatCode)+
 //	Object      → '{' FieldList '}'
 //	FieldList   → FieldItem (',' FieldItem)*
@@ -322,28 +492,76 @@ func (p *Parser) parseExpression() (Node, error) {
 	return p.parsePipe()
 }
 
-// parsePipe parses: Primary ('|' Object)?
+// parsePipe parses: Primary ('|' PipeRHS)*
 func (p *Parser) parsePipe() (Node, error) {
 	left, err := p.parsePrimary()
 	if err != nil {
 		return nil, err
 	}
 
-	// Check for pipe operator
-	if p.current.Type == TokenPipe {
+	// Allow chaining multiple pipe operations
+	for p.current.Type == TokenPipe {
 		if err := p.advance(); err != nil {
 			return nil, err
 		}
 
-		right, err := p.parseObject()
+		var right Node
+		// Check if it's a write function
+		if p.current.Type == TokenIdent && p.current.Value == "write" {
+			right, err = p.parseWriteFunc()
+		} else if p.current.Type == TokenLBrace {
+			right, err = p.parseObject()
+		} else {
+			return nil, fmt.Errorf("expected '{' or 'write' after pipe at position %d, got %q", p.current.Pos, p.current.Value)
+		}
 		if err != nil {
 			return nil, err
 		}
 
-		return &PipeNode{Left: left, Right: right}, nil
+		left = &PipeNode{Left: left, Right: right}
 	}
 
 	return left, nil
+}
+
+// parseWriteFunc parses: 'write' '(' STRING ')'
+func (p *Parser) parseWriteFunc() (Node, error) {
+	if p.current.Value != "write" {
+		return nil, fmt.Errorf("expected 'write' at position %d", p.current.Pos)
+	}
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+
+	// Consume '('
+	if p.current.Type != TokenLParen {
+		return nil, fmt.Errorf("expected '(' after 'write' at position %d", p.current.Pos)
+	}
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+
+	// Expect string literal for file path
+	if p.current.Type != TokenString {
+		return nil, fmt.Errorf("expected file path string at position %d, got %q", p.current.Pos, p.current.Value)
+	}
+	path := p.current.Value
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+
+	// Consume ')'
+	if p.current.Type != TokenRParen {
+		return nil, fmt.Errorf("expected ')' after file path at position %d", p.current.Pos)
+	}
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+
+	return &WriteNode{
+		Path:      path,
+		ByteOrder: NativeOrder, // Will be updated during evaluation
+	}, nil
 }
 
 // parsePrimary parses: FunctionCall | FormatExpr
