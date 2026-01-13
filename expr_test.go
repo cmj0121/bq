@@ -2,6 +2,9 @@ package bq
 
 import (
 	"bytes"
+	"encoding/binary"
+	"fmt"
+	"os"
 	"testing"
 )
 
@@ -2065,5 +2068,566 @@ func TestPrettyPrintString(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// === Write functionality tests ===
+
+func TestTokenizerString(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		tokens []Token
+	}{
+		{
+			name:  "simple string",
+			input: `"hello"`,
+			tokens: []Token{
+				{Type: TokenString, Value: "hello"},
+				{Type: TokenEOF},
+			},
+		},
+		{
+			name:  "string with escape newline",
+			input: `"hello\nworld"`,
+			tokens: []Token{
+				{Type: TokenString, Value: "hello\nworld"},
+				{Type: TokenEOF},
+			},
+		},
+		{
+			name:  "string with escape tab",
+			input: `"hello\tworld"`,
+			tokens: []Token{
+				{Type: TokenString, Value: "hello\tworld"},
+				{Type: TokenEOF},
+			},
+		},
+		{
+			name:  "string with escape quote",
+			input: `"say \"hello\""`,
+			tokens: []Token{
+				{Type: TokenString, Value: `say "hello"`},
+				{Type: TokenEOF},
+			},
+		},
+		{
+			name:  "string with escape backslash",
+			input: `"path\\to\\file"`,
+			tokens: []Token{
+				{Type: TokenString, Value: `path\to\file`},
+				{Type: TokenEOF},
+			},
+		},
+		{
+			name:  "write function call",
+			input: `write("output.bin")`,
+			tokens: []Token{
+				{Type: TokenIdent, Value: "write"},
+				{Type: TokenLParen, Value: "("},
+				{Type: TokenString, Value: "output.bin"},
+				{Type: TokenRParen, Value: ")"},
+				{Type: TokenEOF},
+			},
+		},
+		{
+			name:  "full expression with write",
+			input: `<bH | write("out.bin")`,
+			tokens: []Token{
+				{Type: TokenOrder, Value: "<"},
+				{Type: TokenFormat, Value: "b"},
+				{Type: TokenFormat, Value: "H"},
+				{Type: TokenPipe, Value: "|"},
+				{Type: TokenIdent, Value: "write"},
+				{Type: TokenLParen, Value: "("},
+				{Type: TokenString, Value: "out.bin"},
+				{Type: TokenRParen, Value: ")"},
+				{Type: TokenEOF},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokenizer := NewTokenizer(tt.input)
+			for i, want := range tt.tokens {
+				got, err := tokenizer.Next()
+				if err != nil {
+					t.Fatalf("Next() error = %v at token %d", err, i)
+				}
+				if got.Type != want.Type {
+					t.Errorf("Token[%d].Type = %v, want %v", i, got.Type, want.Type)
+				}
+				if want.Value != "" && got.Value != want.Value {
+					t.Errorf("Token[%d].Value = %q, want %q", i, got.Value, want.Value)
+				}
+			}
+		})
+	}
+}
+
+func TestTokenizerStringErrors(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+	}{
+		{
+			name:  "unterminated string",
+			input: `"hello`,
+		},
+		{
+			name:  "unknown escape sequence",
+			input: `"hello\x"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokenizer := NewTokenizer(tt.input)
+			_, err := tokenizer.Next()
+			if err == nil {
+				t.Error("Expected error, got nil")
+			}
+		})
+	}
+}
+
+func TestParseExpressionWrite(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{
+			name:    "simple write",
+			input:   `<bH | write("output.bin")`,
+			wantErr: false,
+		},
+		{
+			name:    "write with object",
+			input:   `<bH | {0 -> key, 1 -> value} | write("output.bin")`,
+			wantErr: false,
+		},
+		{
+			name:    "write missing path",
+			input:   `<bH | write()`,
+			wantErr: true,
+		},
+		{
+			name:    "write non-string path",
+			input:   `<bH | write(123)`,
+			wantErr: true,
+		},
+		{
+			name:    "write missing closing paren",
+			input:   `<bH | write("output.bin"`,
+			wantErr: true,
+		},
+		{
+			name:    "write missing opening paren",
+			input:   `<bH | write "output.bin")`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, err := ParseExpression(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseExpression() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && node == nil {
+				t.Error("ParseExpression() returned nil node without error")
+			}
+		})
+	}
+}
+
+func TestParseExpressionWriteAST(t *testing.T) {
+	// Test that write parsing produces correct AST structure
+	t.Run("simple write", func(t *testing.T) {
+		node, err := ParseExpression(`<bH | write("output.bin")`)
+		if err != nil {
+			t.Fatalf("ParseExpression() error = %v", err)
+		}
+
+		pipeNode, ok := node.(*PipeNode)
+		if !ok {
+			t.Fatalf("Expected *PipeNode, got %T", node)
+		}
+
+		writeNode, ok := pipeNode.Right.(*WriteNode)
+		if !ok {
+			t.Fatalf("Expected *WriteNode on right, got %T", pipeNode.Right)
+		}
+
+		if writeNode.Path != "output.bin" {
+			t.Errorf("WriteNode.Path = %q, want %q", writeNode.Path, "output.bin")
+		}
+	})
+
+	t.Run("chained write", func(t *testing.T) {
+		node, err := ParseExpression(`<bH | {0 -> a, 1 -> b} | write("out.bin")`)
+		if err != nil {
+			t.Fatalf("ParseExpression() error = %v", err)
+		}
+
+		// Should be: PipeNode(PipeNode(FormatNode, ObjectNode), WriteNode)
+		outerPipe, ok := node.(*PipeNode)
+		if !ok {
+			t.Fatalf("Expected outer *PipeNode, got %T", node)
+		}
+
+		innerPipe, ok := outerPipe.Left.(*PipeNode)
+		if !ok {
+			t.Fatalf("Expected inner *PipeNode, got %T", outerPipe.Left)
+		}
+
+		_, ok = innerPipe.Left.(*FormatNode)
+		if !ok {
+			t.Fatalf("Expected *FormatNode, got %T", innerPipe.Left)
+		}
+
+		_, ok = innerPipe.Right.(*ObjectNode)
+		if !ok {
+			t.Fatalf("Expected *ObjectNode, got %T", innerPipe.Right)
+		}
+
+		writeNode, ok := outerPipe.Right.(*WriteNode)
+		if !ok {
+			t.Fatalf("Expected *WriteNode, got %T", outerPipe.Right)
+		}
+
+		if writeNode.Path != "out.bin" {
+			t.Errorf("WriteNode.Path = %q, want %q", writeNode.Path, "out.bin")
+		}
+	})
+}
+
+func TestEncodeValue(t *testing.T) {
+	tests := []struct {
+		name    string
+		val     any
+		order   binary.ByteOrder
+		want    []byte
+		wantErr bool
+	}{
+		{
+			name:  "int8",
+			val:   int8(-1),
+			order: binary.LittleEndian,
+			want:  []byte{0xFF},
+		},
+		{
+			name:  "uint8",
+			val:   uint8(255),
+			order: binary.LittleEndian,
+			want:  []byte{0xFF},
+		},
+		{
+			name:  "int16 little endian",
+			val:   int16(0x0201),
+			order: binary.LittleEndian,
+			want:  []byte{0x01, 0x02},
+		},
+		{
+			name:  "int16 big endian",
+			val:   int16(0x0201),
+			order: binary.BigEndian,
+			want:  []byte{0x02, 0x01},
+		},
+		{
+			name:  "uint16 little endian",
+			val:   uint16(0x0201),
+			order: binary.LittleEndian,
+			want:  []byte{0x01, 0x02},
+		},
+		{
+			name:  "int32 little endian",
+			val:   int32(0x04030201),
+			order: binary.LittleEndian,
+			want:  []byte{0x01, 0x02, 0x03, 0x04},
+		},
+		{
+			name:  "int32 big endian",
+			val:   int32(0x04030201),
+			order: binary.BigEndian,
+			want:  []byte{0x04, 0x03, 0x02, 0x01},
+		},
+		{
+			name:  "uint32",
+			val:   uint32(0x04030201),
+			order: binary.LittleEndian,
+			want:  []byte{0x01, 0x02, 0x03, 0x04},
+		},
+		{
+			name:  "int64 little endian",
+			val:   int64(0x0807060504030201),
+			order: binary.LittleEndian,
+			want:  []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
+		},
+		{
+			name:  "uint64",
+			val:   uint64(0x0807060504030201),
+			order: binary.LittleEndian,
+			want:  []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08},
+		},
+		{
+			name:  "string",
+			val:   "hi",
+			order: binary.LittleEndian,
+			want:  []byte{'h', 'i', 0},
+		},
+		{
+			name:  "empty string",
+			val:   "",
+			order: binary.LittleEndian,
+			want:  []byte{0},
+		},
+		{
+			name:  "[]uint8",
+			val:   []uint8{1, 2, 3, 4},
+			order: binary.LittleEndian,
+			want:  []byte{1, 2, 3, 4},
+		},
+		{
+			name:  "[]int8",
+			val:   []int8{-1, 0, 1},
+			order: binary.LittleEndian,
+			want:  []byte{0xFF, 0x00, 0x01},
+		},
+		{
+			name:  "[]uint16 little endian",
+			val:   []uint16{0x0102, 0x0304},
+			order: binary.LittleEndian,
+			want:  []byte{0x02, 0x01, 0x04, 0x03},
+		},
+		{
+			name:  "[]uint16 big endian",
+			val:   []uint16{0x0102, 0x0304},
+			order: binary.BigEndian,
+			want:  []byte{0x01, 0x02, 0x03, 0x04},
+		},
+		{
+			name:    "unsupported type",
+			val:     struct{}{},
+			order:   binary.LittleEndian,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			err := encodeValue(&buf, tt.val, tt.order)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("encodeValue() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr {
+				return
+			}
+			if !bytes.Equal(buf.Bytes(), tt.want) {
+				t.Errorf("encodeValue() = %v, want %v", buf.Bytes(), tt.want)
+			}
+		})
+	}
+}
+
+func TestEncodeObject(t *testing.T) {
+	obj := &Object{
+		Fields: []ObjectField{
+			{Name: "a", Value: int8(-1)},
+			{Name: "b", Value: uint16(0x0201)},
+		},
+	}
+
+	var buf bytes.Buffer
+	err := encodeValue(&buf, obj, binary.LittleEndian)
+	if err != nil {
+		t.Fatalf("encodeValue() error = %v", err)
+	}
+
+	want := []byte{0xFF, 0x01, 0x02}
+	if !bytes.Equal(buf.Bytes(), want) {
+		t.Errorf("encodeValue() = %v, want %v", buf.Bytes(), want)
+	}
+}
+
+func TestWriteNodeEval(t *testing.T) {
+	// Create temp file for testing
+	tmpFile, err := os.CreateTemp("", "bq-test-*.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpPath := tmpFile.Name()
+	_ = tmpFile.Close()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	// Test writing binary data
+	node, err := ParseExpression(fmt.Sprintf(`<bH | write("%s")`, tmpPath))
+	if err != nil {
+		t.Fatalf("ParseExpression error: %v", err)
+	}
+
+	data := []byte{0xFF, 0x01, 0x02}
+	_, err = node.Eval(bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Eval error: %v", err)
+	}
+
+	// Verify written content
+	written, err := os.ReadFile(tmpPath)
+	if err != nil {
+		t.Fatalf("ReadFile error: %v", err)
+	}
+	if !bytes.Equal(written, data) {
+		t.Errorf("Written data = %v, want %v", written, data)
+	}
+}
+
+func TestWriteWithObject(t *testing.T) {
+	// Test that writing through an object preserves data
+	tmpFile, err := os.CreateTemp("", "bq-test-*.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpPath := tmpFile.Name()
+	_ = tmpFile.Close()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	input := fmt.Sprintf(`<bH | {0 -> key, 1 -> value} | write("%s")`, tmpPath)
+	node, err := ParseExpression(input)
+	if err != nil {
+		t.Fatalf("ParseExpression error: %v", err)
+	}
+
+	data := []byte{0xFF, 0x01, 0x02}
+	_, err = node.Eval(bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Eval error: %v", err)
+	}
+
+	// Object writing should preserve original binary data
+	written, err := os.ReadFile(tmpPath)
+	if err != nil {
+		t.Fatalf("ReadFile error: %v", err)
+	}
+	if !bytes.Equal(written, data) {
+		t.Errorf("Written data = %v, want %v", written, data)
+	}
+}
+
+func TestWriteByteOrderPropagation(t *testing.T) {
+	tests := []struct {
+		name   string
+		format string
+		data   []byte
+		want   []byte
+	}{
+		{
+			name:   "little endian",
+			format: "<H",
+			data:   []byte{0x01, 0x02},
+			want:   []byte{0x01, 0x02},
+		},
+		{
+			name:   "big endian",
+			format: ">H",
+			data:   []byte{0x01, 0x02},
+			want:   []byte{0x01, 0x02},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpFile, err := os.CreateTemp("", "bq-test-*.bin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			tmpPath := tmpFile.Name()
+			_ = tmpFile.Close()
+			defer func() { _ = os.Remove(tmpPath) }()
+
+			input := fmt.Sprintf(`%s | write("%s")`, tt.format, tmpPath)
+			node, err := ParseExpression(input)
+			if err != nil {
+				t.Fatalf("ParseExpression error: %v", err)
+			}
+
+			_, err = node.Eval(bytes.NewReader(tt.data), nil)
+			if err != nil {
+				t.Fatalf("Eval error: %v", err)
+			}
+
+			written, err := os.ReadFile(tmpPath)
+			if err != nil {
+				t.Fatalf("ReadFile error: %v", err)
+			}
+			if !bytes.Equal(written, tt.want) {
+				t.Errorf("Written data = %v, want %v", written, tt.want)
+			}
+		})
+	}
+}
+
+func TestWriteWithArray(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "bq-test-*.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpPath := tmpFile.Name()
+	_ = tmpFile.Close()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	input := fmt.Sprintf(`<4B | write("%s")`, tmpPath)
+	node, err := ParseExpression(input)
+	if err != nil {
+		t.Fatalf("ParseExpression error: %v", err)
+	}
+
+	data := []byte{0x01, 0x02, 0x03, 0x04}
+	_, err = node.Eval(bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Eval error: %v", err)
+	}
+
+	written, err := os.ReadFile(tmpPath)
+	if err != nil {
+		t.Fatalf("ReadFile error: %v", err)
+	}
+	if !bytes.Equal(written, data) {
+		t.Errorf("Written data = %v, want %v", written, data)
+	}
+}
+
+func TestWriteWithString(t *testing.T) {
+	tmpFile, err := os.CreateTemp("", "bq-test-*.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpPath := tmpFile.Name()
+	_ = tmpFile.Close()
+	defer func() { _ = os.Remove(tmpPath) }()
+
+	input := fmt.Sprintf(`<Bs | write("%s")`, tmpPath)
+	node, err := ParseExpression(input)
+	if err != nil {
+		t.Fatalf("ParseExpression error: %v", err)
+	}
+
+	data := []byte{0x01, 'h', 'i', 0}
+	_, err = node.Eval(bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Eval error: %v", err)
+	}
+
+	written, err := os.ReadFile(tmpPath)
+	if err != nil {
+		t.Fatalf("ReadFile error: %v", err)
+	}
+	if !bytes.Equal(written, data) {
+		t.Errorf("Written data = %v, want %v", written, data)
 	}
 }
