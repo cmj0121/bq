@@ -108,6 +108,119 @@ type Object struct {
 	Fields []ObjectField
 }
 
+// WriteNode writes binary data to a file.
+type WriteNode struct {
+	Path      string    // output file path
+	ByteOrder ByteOrder // byte order for writing
+}
+
+// Eval writes the input values to the specified file.
+func (n *WriteNode) Eval(_ io.Reader, values []any) (any, error) {
+	// Create or truncate the output file
+	f, err := os.Create(n.Path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create output file %q: %w", n.Path, err)
+	}
+
+	// Encode and write values
+	if err := n.writeValues(f, values); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+
+	// Close and check for errors
+	if err := f.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close output file %q: %w", n.Path, err)
+	}
+
+	// Return the values unchanged for potential further processing
+	return values, nil
+}
+
+// writeValues encodes and writes all values to the writer.
+func (n *WriteNode) writeValues(w io.Writer, values []any) error {
+	order := n.binaryOrder()
+	for i, val := range values {
+		if err := encodeValue(w, val, order); err != nil {
+			return fmt.Errorf("failed to encode value at index %d: %w", i, err)
+		}
+	}
+	return nil
+}
+
+// binaryOrder returns the binary.ByteOrder for this node.
+func (n *WriteNode) binaryOrder() binary.ByteOrder {
+	switch n.ByteOrder {
+	case LittleEndian:
+		return binary.LittleEndian
+	case BigEndian:
+		return binary.BigEndian
+	default:
+		return nativeEndian()
+	}
+}
+
+// encodeValue encodes a single value to binary format.
+func encodeValue(w io.Writer, val any, order binary.ByteOrder) error {
+	switch v := val.(type) {
+	case int8:
+		return binary.Write(w, order, v)
+	case uint8:
+		return binary.Write(w, order, v)
+	case int16:
+		return binary.Write(w, order, v)
+	case uint16:
+		return binary.Write(w, order, v)
+	case int32:
+		return binary.Write(w, order, v)
+	case uint32:
+		return binary.Write(w, order, v)
+	case int64:
+		return binary.Write(w, order, v)
+	case uint64:
+		return binary.Write(w, order, v)
+	case string:
+		// Write null-terminated string
+		if _, err := w.Write([]byte(v)); err != nil {
+			return err
+		}
+		return binary.Write(w, order, byte(0)) // null terminator
+	// Array types
+	case []int8:
+		for _, x := range v {
+			if err := binary.Write(w, order, x); err != nil {
+				return err
+			}
+		}
+		return nil
+	case []uint8:
+		_, err := w.Write(v)
+		return err
+	case []int16:
+		return binary.Write(w, order, v)
+	case []uint16:
+		return binary.Write(w, order, v)
+	case []int32:
+		return binary.Write(w, order, v)
+	case []uint32:
+		return binary.Write(w, order, v)
+	case []int64:
+		return binary.Write(w, order, v)
+	case []uint64:
+		return binary.Write(w, order, v)
+	case *Object:
+		// Encode object fields in order
+		for _, field := range v.Fields {
+			if err := encodeValue(w, field.Value, order); err != nil {
+				return fmt.Errorf("field %q: %w", field.Name, err)
+			}
+		}
+		return nil
+	default:
+		return fmt.Errorf("unsupported type for encoding: %T", val)
+	}
+}
+
 // TokenType represents the type of a token in the expression.
 type TokenType int
 
