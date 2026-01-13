@@ -122,6 +122,35 @@ Name       Code   Type                    Value                  Hex
 0          s      string                     你好  [e4 bd a0 e5 a5 bd]
 ```
 
+### Search Pattern
+
+Use `?"..."` to search for a byte pattern and return the position of the first match:
+
+```bash
+$ printf '\x00\x00\x89PNG' | bq '?"\x89PNG"' -p
+Name       Code   Type                    Value                  Hex
+--------------------------------------------------------------------
+0          q      int64                       2   0x0000000000000002
+```
+
+The search pattern supports:
+
+- ASCII strings: `?"PNG"`
+- Hex escape sequences: `?"\x89\x50\x4e\x47"`
+- Mixed patterns: `?"\x89PNG\x0d\x0a"`
+- Null bytes: `?"\x00\x00"`
+
+Use with pipes to create named results:
+
+```bash
+$ printf '\x00\x00\x89PNG' | bq '?"\x89PNG" | {0 -> offset}' -p
+Name       Code   Type                    Value                  Hex
+--------------------------------------------------------------------
+offset     q      int64                       2   0x0000000000000002
+```
+
+Returns an error if the pattern is not found.
+
 ### Functions
 
 #### parse()
@@ -264,6 +293,7 @@ chunk_length i    int32               218103808           0x0d000000
 - [x] Nested objects: `{0 -> a, nested: {1 -> b, 2 -> c}}`
 - [x] String type support (`s`) - null-terminated strings
 - [x] Write/modify binary data - `write("path")` function
+- [x] Search pattern - `?"..."` syntax to find byte patterns
 - [ ] Float type support (`f`, `d`)
 
 [0]: https://docs.python.org/3.14/library/struct.html

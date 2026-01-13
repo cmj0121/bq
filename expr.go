@@ -1,6 +1,7 @@
 package bq
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -237,24 +238,47 @@ func encodeValue(w io.Writer, val any, order binary.ByteOrder) error {
 	}
 }
 
+// SearchNode searches for a byte pattern and returns the position.
+type SearchNode struct {
+	Pattern []byte // byte pattern to search for
+}
+
+// Eval searches for the pattern in the input and returns the position of first match.
+func (n *SearchNode) Eval(r io.Reader, _ []any) (any, error) {
+	// Read all data from reader
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read input: %w", err)
+	}
+
+	// Search for pattern
+	pos := bytes.Index(data, n.Pattern)
+	if pos < 0 {
+		return nil, fmt.Errorf("pattern not found")
+	}
+
+	return []any{int64(pos)}, nil
+}
+
 // TokenType represents the type of a token in the expression.
 type TokenType int
 
 const (
-	TokenEOF    TokenType = iota // end of input
-	TokenPipe                    // |
-	TokenLBrace                  // {
-	TokenRBrace                  // }
-	TokenLParen                  // (
-	TokenRParen                  // )
-	TokenColon                   // :
-	TokenArrow                   // ->
-	TokenComma                   // ,
-	TokenNumber                  // integer literal (for index)
-	TokenIdent                   // identifier (for field name or function)
-	TokenFormat                  // format code (b, B, h, H, i, I, q, Q)
-	TokenOrder                   // byte order prefix (<, >, @)
-	TokenString                  // string literal "..."
+	TokenEOF      TokenType = iota // end of input
+	TokenPipe                      // |
+	TokenLBrace                    // {
+	TokenRBrace                    // }
+	TokenLParen                    // (
+	TokenRParen                    // )
+	TokenColon                     // :
+	TokenArrow                     // ->
+	TokenComma                     // ,
+	TokenNumber                    // integer literal (for index)
+	TokenIdent                     // identifier (for field name or function)
+	TokenFormat                    // format code (b, B, h, H, i, I, q, Q)
+	TokenOrder                     // byte order prefix (<, >, @)
+	TokenString                    // string literal "..."
+	TokenQuestion                  // ? (search prefix)
 )
 
 // Token represents a single token in the expression.
@@ -315,6 +339,9 @@ func (t *Tokenizer) Next() (Token, error) {
 	case '<', '>', '@':
 		t.pos++
 		return Token{Type: TokenOrder, Value: string(ch), Pos: startPos}, nil
+	case '?':
+		t.pos++
+		return Token{Type: TokenQuestion, Value: "?", Pos: startPos}, nil
 	}
 
 	// Arrow operator ->
@@ -410,10 +437,26 @@ func (t *Tokenizer) scanString(startPos int) (Token, error) {
 				sb.WriteRune('\n')
 			case 't':
 				sb.WriteRune('\t')
+			case 'r':
+				sb.WriteRune('\r')
+			case '0':
+				sb.WriteRune('\x00')
 			case '\\':
 				sb.WriteRune('\\')
 			case '"':
 				sb.WriteRune('"')
+			case 'x':
+				// Hex escape sequence: \xNN
+				if t.pos+2 >= len(t.input) {
+					return Token{}, fmt.Errorf("incomplete hex escape at position %d", t.pos)
+				}
+				hexStr := string(t.input[t.pos+1 : t.pos+3])
+				val, err := strconv.ParseUint(hexStr, 16, 8)
+				if err != nil {
+					return Token{}, fmt.Errorf("invalid hex escape \\x%s at position %d", hexStr, t.pos)
+				}
+				sb.WriteByte(byte(val))
+				t.pos += 2 // skip the two hex digits (the loop will advance once more)
 			default:
 				return Token{}, fmt.Errorf("unknown escape sequence \\%c at position %d", t.input[t.pos], t.pos)
 			}
@@ -566,6 +609,11 @@ func (p *Parser) parseWriteFunc() (Node, error) {
 
 // parsePrimary parses: FunctionCall | FormatExpr
 func (p *Parser) parsePrimary() (Node, error) {
+	// Check for search expression: '?' STRING
+	if p.current.Type == TokenQuestion {
+		return p.parseSearchExpr()
+	}
+
 	// Check for function call: IDENT '(' ... ')'
 	if p.current.Type == TokenIdent {
 		// Peek ahead to see if next token is '('
@@ -578,6 +626,26 @@ func (p *Parser) parsePrimary() (Node, error) {
 		}
 	}
 	return p.parseFormatExpr()
+}
+
+// parseSearchExpr parses: '?' STRING
+// Returns a SearchNode that searches for the byte pattern.
+func (p *Parser) parseSearchExpr() (Node, error) {
+	// Already at '?', advance to the string
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+
+	if p.current.Type != TokenString {
+		return nil, fmt.Errorf("expected string after '?' at position %d", p.current.Pos)
+	}
+
+	pattern := []byte(p.current.Value)
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+
+	return &SearchNode{Pattern: pattern}, nil
 }
 
 // parseFunctionCall parses: IDENT '(' FormatExpr ')'

@@ -2631,3 +2631,168 @@ func TestWriteWithString(t *testing.T) {
 		t.Errorf("Written data = %v, want %v", written, data)
 	}
 }
+
+// --- Search Pattern Tests ---
+
+func TestTokenizerQuestion(t *testing.T) {
+	tokenizer := NewTokenizer(`?"hello"`)
+	tests := []struct {
+		expectedType  TokenType
+		expectedValue string
+	}{
+		{TokenQuestion, "?"},
+		{TokenString, "hello"},
+		{TokenEOF, ""},
+	}
+
+	for i, tt := range tests {
+		tok, err := tokenizer.Next()
+		if err != nil {
+			t.Fatalf("test %d: unexpected error: %v", i, err)
+		}
+		if tok.Type != tt.expectedType {
+			t.Errorf("test %d: got type %d, want %d", i, tok.Type, tt.expectedType)
+		}
+		if tok.Value != tt.expectedValue {
+			t.Errorf("test %d: got value %q, want %q", i, tok.Value, tt.expectedValue)
+		}
+	}
+}
+
+func TestTokenizerHexEscape(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+		hasError bool
+	}{
+		{`"\x89PNG"`, "\x89PNG", false},
+		{`"\x00\xff"`, "\x00\xff", false},
+		{`"\x41\x42\x43"`, "ABC", false},
+		{`"hello\x00world"`, "hello\x00world", false},
+		{`"\x0"`, "", true},  // incomplete hex
+		{`"\xGG"`, "", true}, // invalid hex
+	}
+
+	for _, tt := range tests {
+		tokenizer := NewTokenizer(tt.input)
+		tok, err := tokenizer.Next()
+		if tt.hasError {
+			if err == nil {
+				t.Errorf("input %q: expected error but got none", tt.input)
+			}
+		} else {
+			if err != nil {
+				t.Errorf("input %q: unexpected error: %v", tt.input, err)
+				continue
+			}
+			if tok.Type != TokenString {
+				t.Errorf("input %q: got type %d, want TokenString", tt.input, tok.Type)
+			}
+			if tok.Value != tt.expected {
+				t.Errorf("input %q: got value %v, want %v", tt.input, []byte(tok.Value), []byte(tt.expected))
+			}
+		}
+	}
+}
+
+func TestParseExpressionSearch(t *testing.T) {
+	tests := []struct {
+		input   string
+		pattern string
+	}{
+		{`?"PNG"`, "PNG"},
+		{`?"\x89PNG"`, "\x89PNG"},
+		{`?"hello\x00"`, "hello\x00"},
+	}
+
+	for _, tt := range tests {
+		node, err := ParseExpression(tt.input)
+		if err != nil {
+			t.Errorf("input %q: unexpected error: %v", tt.input, err)
+			continue
+		}
+		search, ok := node.(*SearchNode)
+		if !ok {
+			t.Errorf("input %q: got %T, want *SearchNode", tt.input, node)
+			continue
+		}
+		if !bytes.Equal(search.Pattern, []byte(tt.pattern)) {
+			t.Errorf("input %q: got pattern %v, want %v", tt.input, search.Pattern, []byte(tt.pattern))
+		}
+	}
+}
+
+func TestSearchNodeEval(t *testing.T) {
+	tests := []struct {
+		data     []byte
+		pattern  []byte
+		expected int64
+	}{
+		{[]byte{0x89, 'P', 'N', 'G'}, []byte{0x89, 'P', 'N', 'G'}, 0},
+		{[]byte{0x00, 0x00, 0x89, 'P', 'N', 'G'}, []byte{0x89, 'P', 'N', 'G'}, 2},
+		{[]byte("hello world"), []byte("world"), 6},
+		{[]byte("aaa"), []byte("a"), 0},
+	}
+
+	for _, tt := range tests {
+		node := &SearchNode{Pattern: tt.pattern}
+		result, err := node.Eval(bytes.NewReader(tt.data), nil)
+		if err != nil {
+			t.Errorf("data %v, pattern %v: unexpected error: %v", tt.data, tt.pattern, err)
+			continue
+		}
+		values, ok := result.([]any)
+		if !ok || len(values) != 1 {
+			t.Errorf("data %v, pattern %v: expected []any with 1 element, got %T", tt.data, tt.pattern, result)
+			continue
+		}
+		pos, ok := values[0].(int64)
+		if !ok {
+			t.Errorf("data %v, pattern %v: expected int64, got %T", tt.data, tt.pattern, values[0])
+			continue
+		}
+		if pos != tt.expected {
+			t.Errorf("data %v, pattern %v: got position %d, want %d", tt.data, tt.pattern, pos, tt.expected)
+		}
+	}
+}
+
+func TestSearchNotFound(t *testing.T) {
+	node := &SearchNode{Pattern: []byte("xyz")}
+	_, err := node.Eval(bytes.NewReader([]byte("abc")), nil)
+	if err == nil {
+		t.Error("expected error for pattern not found, got nil")
+	}
+	if err != nil && err.Error() != "pattern not found" {
+		t.Errorf("got error %q, want %q", err.Error(), "pattern not found")
+	}
+}
+
+func TestSearchWithPipe(t *testing.T) {
+	// Test that search can be piped to an object
+	input := `?"PNG" | {0 -> position}`
+	node, err := ParseExpression(input)
+	if err != nil {
+		t.Fatalf("ParseExpression error: %v", err)
+	}
+
+	data := []byte{0x00, 0x00, 'P', 'N', 'G'}
+	result, err := node.Eval(bytes.NewReader(data), nil)
+	if err != nil {
+		t.Fatalf("Eval error: %v", err)
+	}
+
+	obj, ok := result.(*Object)
+	if !ok {
+		t.Fatalf("expected *Object, got %T", result)
+	}
+	if len(obj.Fields) != 1 {
+		t.Fatalf("expected 1 field, got %d", len(obj.Fields))
+	}
+	if obj.Fields[0].Name != "position" {
+		t.Errorf("expected field name 'position', got %q", obj.Fields[0].Name)
+	}
+	if obj.Fields[0].Value != int64(2) {
+		t.Errorf("expected value 2, got %v", obj.Fields[0].Value)
+	}
+}
