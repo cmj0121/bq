@@ -125,6 +125,7 @@ const (
 	TokenIdent                   // identifier (for field name or function)
 	TokenFormat                  // format code (b, B, h, H, i, I, q, Q)
 	TokenOrder                   // byte order prefix (<, >, @)
+	TokenString                  // string literal "..."
 )
 
 // Token represents a single token in the expression.
@@ -193,6 +194,11 @@ func (t *Tokenizer) Next() (Token, error) {
 		return Token{Type: TokenArrow, Value: "->", Pos: startPos}, nil
 	}
 
+	// String literal
+	if ch == '"' {
+		return t.scanString(startPos)
+	}
+
 	// Number (for index)
 	if isDigit(ch) {
 		return t.scanNumber(startPos)
@@ -255,6 +261,39 @@ func (t *Tokenizer) scanIdent(startPos int) (Token, error) {
 		t.pos++
 	}
 	return Token{Type: TokenIdent, Value: string(t.input[startPos:t.pos]), Pos: startPos}, nil
+}
+
+// scanString scans a string literal token.
+func (t *Tokenizer) scanString(startPos int) (Token, error) {
+	t.pos++ // skip opening quote
+	var sb strings.Builder
+	for t.pos < len(t.input) {
+		ch := t.input[t.pos]
+		if ch == '"' {
+			t.pos++ // skip closing quote
+			return Token{Type: TokenString, Value: sb.String(), Pos: startPos}, nil
+		}
+		if ch == '\\' && t.pos+1 < len(t.input) {
+			// Handle escape sequences
+			t.pos++
+			switch t.input[t.pos] {
+			case 'n':
+				sb.WriteRune('\n')
+			case 't':
+				sb.WriteRune('\t')
+			case '\\':
+				sb.WriteRune('\\')
+			case '"':
+				sb.WriteRune('"')
+			default:
+				return Token{}, fmt.Errorf("unknown escape sequence \\%c at position %d", t.input[t.pos], t.pos)
+			}
+		} else {
+			sb.WriteRune(ch)
+		}
+		t.pos++
+	}
+	return Token{}, fmt.Errorf("unterminated string literal starting at position %d", startPos)
 }
 
 func isWhitespace(ch rune) bool {
