@@ -44,10 +44,26 @@ func (n *PipeNode) Eval(r io.Reader, values []any) (any, error) {
 		return nil, err
 	}
 
-	// Left result should be []any for piping to right
-	leftValues, ok := leftResult.([]any)
-	if !ok {
-		return nil, fmt.Errorf("pipe left side must produce []any, got %T", leftResult)
+	// Left result can be []any or *Object
+	var leftValues []any
+	switch lr := leftResult.(type) {
+	case []any:
+		leftValues = lr
+	case *Object:
+		// Extract values from object for piping
+		leftValues = make([]any, len(lr.Fields))
+		for i, f := range lr.Fields {
+			leftValues[i] = f.Value
+		}
+	default:
+		return nil, fmt.Errorf("pipe left side must produce []any or *Object, got %T", leftResult)
+	}
+
+	// If right is WriteNode, inherit byte order from left FormatNode
+	if writeNode, ok := n.Right.(*WriteNode); ok {
+		if formatExpr, ok := extractFormatNode(n.Left); ok {
+			writeNode.ByteOrder = formatExpr.Order
+		}
 	}
 
 	return n.Right.Eval(r, leftValues)
@@ -442,9 +458,11 @@ func NewParser(input string) *Parser {
 // Grammar:
 //
 //	Expression  → Pipe
-//	Pipe        → Primary ('|' Object)?
+//	Pipe        → Primary ('|' PipeRHS)*
+//	PipeRHS     → Object | WriteFunc
 //	Primary     → FunctionCall | FormatExpr
 //	FunctionCall→ IDENT '(' FormatExpr ')'
+//	WriteFunc   → 'write' '(' STRING ')'
 //	FormatExpr  → ByteOrder? (Count? FormatCode)+
 //	Object      → '{' FieldList '}'
 //	FieldList   → FieldItem (',' FieldItem)*
@@ -474,28 +492,76 @@ func (p *Parser) parseExpression() (Node, error) {
 	return p.parsePipe()
 }
 
-// parsePipe parses: Primary ('|' Object)?
+// parsePipe parses: Primary ('|' PipeRHS)*
 func (p *Parser) parsePipe() (Node, error) {
 	left, err := p.parsePrimary()
 	if err != nil {
 		return nil, err
 	}
 
-	// Check for pipe operator
-	if p.current.Type == TokenPipe {
+	// Allow chaining multiple pipe operations
+	for p.current.Type == TokenPipe {
 		if err := p.advance(); err != nil {
 			return nil, err
 		}
 
-		right, err := p.parseObject()
+		var right Node
+		// Check if it's a write function
+		if p.current.Type == TokenIdent && p.current.Value == "write" {
+			right, err = p.parseWriteFunc()
+		} else if p.current.Type == TokenLBrace {
+			right, err = p.parseObject()
+		} else {
+			return nil, fmt.Errorf("expected '{' or 'write' after pipe at position %d, got %q", p.current.Pos, p.current.Value)
+		}
 		if err != nil {
 			return nil, err
 		}
 
-		return &PipeNode{Left: left, Right: right}, nil
+		left = &PipeNode{Left: left, Right: right}
 	}
 
 	return left, nil
+}
+
+// parseWriteFunc parses: 'write' '(' STRING ')'
+func (p *Parser) parseWriteFunc() (Node, error) {
+	if p.current.Value != "write" {
+		return nil, fmt.Errorf("expected 'write' at position %d", p.current.Pos)
+	}
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+
+	// Consume '('
+	if p.current.Type != TokenLParen {
+		return nil, fmt.Errorf("expected '(' after 'write' at position %d", p.current.Pos)
+	}
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+
+	// Expect string literal for file path
+	if p.current.Type != TokenString {
+		return nil, fmt.Errorf("expected file path string at position %d, got %q", p.current.Pos, p.current.Value)
+	}
+	path := p.current.Value
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+
+	// Consume ')'
+	if p.current.Type != TokenRParen {
+		return nil, fmt.Errorf("expected ')' after file path at position %d", p.current.Pos)
+	}
+	if err := p.advance(); err != nil {
+		return nil, err
+	}
+
+	return &WriteNode{
+		Path:      path,
+		ByteOrder: NativeOrder, // Will be updated during evaluation
+	}, nil
 }
 
 // parsePrimary parses: FunctionCall | FormatExpr
