@@ -167,14 +167,7 @@ func (n *WriteNode) writeValues(w io.Writer, values []any) error {
 
 // binaryOrder returns the binary.ByteOrder for this node.
 func (n *WriteNode) binaryOrder() binary.ByteOrder {
-	switch n.ByteOrder {
-	case LittleEndian:
-		return binary.LittleEndian
-	case BigEndian:
-		return binary.BigEndian
-	default:
-		return nativeEndian()
-	}
+	return toBinaryOrder(n.ByteOrder)
 }
 
 // encodeValue encodes a single value to binary format.
@@ -288,6 +281,21 @@ type Token struct {
 	Pos   int    // position in the input string
 }
 
+// singleCharTokens maps single characters to their token types.
+var singleCharTokens = map[rune]TokenType{
+	'|': TokenPipe,
+	'{': TokenLBrace,
+	'}': TokenRBrace,
+	'(': TokenLParen,
+	')': TokenRParen,
+	':': TokenColon,
+	',': TokenComma,
+	'<': TokenOrder,
+	'>': TokenOrder,
+	'@': TokenOrder,
+	'?': TokenQuestion,
+}
+
 // Tokenizer breaks an expression string into tokens.
 type Tokenizer struct {
 	input []rune
@@ -314,34 +322,9 @@ func (t *Tokenizer) Next() (Token, error) {
 	ch := t.input[t.pos]
 
 	// Single character tokens
-	switch ch {
-	case '|':
+	if tokType, ok := singleCharTokens[ch]; ok {
 		t.pos++
-		return Token{Type: TokenPipe, Value: "|", Pos: startPos}, nil
-	case '{':
-		t.pos++
-		return Token{Type: TokenLBrace, Value: "{", Pos: startPos}, nil
-	case '}':
-		t.pos++
-		return Token{Type: TokenRBrace, Value: "}", Pos: startPos}, nil
-	case '(':
-		t.pos++
-		return Token{Type: TokenLParen, Value: "(", Pos: startPos}, nil
-	case ')':
-		t.pos++
-		return Token{Type: TokenRParen, Value: ")", Pos: startPos}, nil
-	case ':':
-		t.pos++
-		return Token{Type: TokenColon, Value: ":", Pos: startPos}, nil
-	case ',':
-		t.pos++
-		return Token{Type: TokenComma, Value: ",", Pos: startPos}, nil
-	case '<', '>', '@':
-		t.pos++
-		return Token{Type: TokenOrder, Value: string(ch), Pos: startPos}, nil
-	case '?':
-		t.pos++
-		return Token{Type: TokenQuestion, Value: "?", Pos: startPos}, nil
+		return Token{Type: tokType, Value: string(ch), Pos: startPos}, nil
 	}
 
 	// Arrow operator ->
@@ -363,7 +346,7 @@ func (t *Tokenizer) Next() (Token, error) {
 	// Format codes (single character) - only if not followed by non-format-code letters
 	// This distinguishes format codes like 'b' from identifiers like 'bar'
 	// Examples: 'bH' -> two format codes, 'b4B' -> format b, number 4, format B, 'bar' -> identifier
-	if _, ok := formatCodeInfo[ch]; ok {
+	if _, ok := formatCodeRegistry[ch]; ok {
 		nextPos := t.pos + 1
 		if nextPos >= len(t.input) {
 			// End of input - it's a format code
@@ -373,7 +356,7 @@ func (t *Tokenizer) Next() (Token, error) {
 		nextCh := t.input[nextPos]
 		// If next char is a format code, digit, or not alphanumeric, treat current as format code
 		// Only treat as identifier start if followed by non-format-code letter
-		_, nextIsFormat := formatCodeInfo[nextCh]
+		_, nextIsFormat := formatCodeRegistry[nextCh]
 		if !isAlphanumeric(nextCh) || nextIsFormat || isDigit(nextCh) {
 			t.pos++
 			return Token{Type: TokenFormat, Value: string(ch), Pos: startPos}, nil
@@ -468,18 +451,24 @@ func (t *Tokenizer) scanString(startPos int) (Token, error) {
 	return Token{}, fmt.Errorf("unterminated string literal starting at position %d", startPos)
 }
 
+// isWhitespace returns true if ch is a whitespace character.
 func isWhitespace(ch rune) bool {
-	return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
+	return unicode.IsSpace(ch)
 }
 
+// isDigit returns true if ch is an ASCII digit (0-9).
+// Intentionally ASCII-only for format string parsing.
 func isDigit(ch rune) bool {
 	return ch >= '0' && ch <= '9'
 }
 
+// isLetter returns true if ch is an ASCII letter (a-z, A-Z).
+// Intentionally ASCII-only for format string identifiers.
 func isLetter(ch rune) bool {
 	return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')
 }
 
+// isAlphanumeric returns true if ch is an ASCII letter, digit, or underscore.
 func isAlphanumeric(ch rune) bool {
 	return isLetter(ch) || isDigit(ch) || ch == '_'
 }
@@ -735,7 +724,7 @@ func (p *Parser) parseFormatExpr() (Node, error) {
 		}
 
 		code := rune(p.current.Value[0])
-		info := formatCodeInfo[code]
+		info := formatCodeRegistry[code]
 		expr.Formats = append(expr.Formats, FormatCode{
 			Code:   code,
 			Size:   info.size,
@@ -928,34 +917,25 @@ type Expr struct {
 	Formats []FormatCode
 }
 
-// formatCodeInfo holds the size and signedness for each format code.
-// Size of 0 indicates variable-length type (e.g., null-terminated string).
-var formatCodeInfo = map[rune]struct {
-	size   int
-	signed bool
-}{
-	'b': {1, true},  // signed char
-	'B': {1, false}, // unsigned char
-	'h': {2, true},  // signed short
-	'H': {2, false}, // unsigned short
-	'i': {4, true},  // signed int
-	'I': {4, false}, // unsigned int
-	'q': {8, true},  // signed long
-	'Q': {8, false}, // unsigned long
-	's': {0, false}, // null-terminated string (variable length)
+// formatCodeMeta holds metadata for each format code.
+type formatCodeMeta struct {
+	size     int    // byte size (0 for variable-length types)
+	signed   bool   // whether the type is signed
+	typeName string // human-readable type name
 }
 
-// formatCodeTypeName returns the human-readable type name for each format code.
-var formatCodeTypeName = map[rune]string{
-	'b': "int8",
-	'B': "uint8",
-	'h': "int16",
-	'H': "uint16",
-	'i': "int32",
-	'I': "uint32",
-	'q': "int64",
-	'Q': "uint64",
-	's': "string",
+// formatCodeRegistry maps format codes to their metadata.
+// Size of 0 indicates variable-length type (e.g., null-terminated string).
+var formatCodeRegistry = map[rune]formatCodeMeta{
+	'b': {1, true, "int8"},    // signed char
+	'B': {1, false, "uint8"},  // unsigned char
+	'h': {2, true, "int16"},   // signed short
+	'H': {2, false, "uint16"}, // unsigned short
+	'i': {4, true, "int32"},   // signed int
+	'I': {4, false, "uint32"}, // unsigned int
+	'q': {8, true, "int64"},   // signed long
+	'Q': {8, false, "uint64"}, // unsigned long
+	's': {0, false, "string"}, // null-terminated string
 }
 
 // Parse parses a format string and returns an Expr.
@@ -968,71 +948,17 @@ func Parse(format string) (*Expr, error) {
 		return nil, fmt.Errorf("empty format string")
 	}
 
-	expr := &Expr{
-		Order:   NativeOrder,
-		Formats: make([]FormatCode, 0),
+	node, err := ParseExpression(format)
+	if err != nil {
+		return nil, err
 	}
 
-	runes := []rune(format)
-	i := 0
-
-	// Check for byte order prefix
-	switch runes[0] {
-	case '<':
-		expr.Order = LittleEndian
-		i = 1
-	case '>':
-		expr.Order = BigEndian
-		i = 1
-	case '@':
-		expr.Order = NativeOrder
-		i = 1
+	formatNode, ok := node.(*FormatNode)
+	if !ok {
+		return nil, fmt.Errorf("expected format expression, got %T", node)
 	}
 
-	// Parse format codes with optional count prefix
-	for i < len(runes) {
-		count := 1
-
-		// Check for count prefix (digits)
-		if isDigit(runes[i]) {
-			countStart := i
-			for i < len(runes) && isDigit(runes[i]) {
-				i++
-			}
-			var err error
-			count, err = strconv.Atoi(string(runes[countStart:i]))
-			if err != nil {
-				return nil, fmt.Errorf("invalid count: %w", err)
-			}
-			if count < 1 {
-				return nil, fmt.Errorf("count must be at least 1, got %d", count)
-			}
-		}
-
-		if i >= len(runes) {
-			return nil, fmt.Errorf("expected format code after count")
-		}
-
-		code := runes[i]
-		info, ok := formatCodeInfo[code]
-		if !ok {
-			return nil, fmt.Errorf("unknown format code: %c", code)
-		}
-
-		expr.Formats = append(expr.Formats, FormatCode{
-			Code:   code,
-			Size:   info.size,
-			Signed: info.signed,
-			Count:  count,
-		})
-		i++
-	}
-
-	if len(expr.Formats) == 0 {
-		return nil, fmt.Errorf("no format codes in expression")
-	}
-
-	return expr, nil
+	return formatNode.Expr, nil
 }
 
 // Read reads binary data from the reader and returns the parsed values.
@@ -1186,7 +1112,12 @@ func (fc *FormatCode) decodeArray(r io.Reader, order binary.ByteOrder, count int
 
 // binaryOrder returns the binary.ByteOrder for this expression.
 func (e *Expr) binaryOrder() binary.ByteOrder {
-	switch e.Order {
+	return toBinaryOrder(e.Order)
+}
+
+// toBinaryOrder converts ByteOrder to binary.ByteOrder.
+func toBinaryOrder(order ByteOrder) binary.ByteOrder {
+	switch order {
 	case LittleEndian:
 		return binary.LittleEndian
 	case BigEndian:
@@ -1263,7 +1194,7 @@ func PrettyPrint(w io.Writer, expr *Expr, values []any) error {
 
 	for i, val := range values {
 		fc := expr.Formats[i]
-		typeName := formatCodeTypeName[fc.Code]
+		typeName := formatCodeRegistry[fc.Code].typeName
 		hexStr := formatHex(val)
 
 		if _, err := fmt.Fprintf(w, "%-6d %-6c %-8s %20v %20s\n", i, fc.Code, typeName, val, hexStr); err != nil {
@@ -1355,7 +1286,7 @@ func prettyPrintValue(w io.Writer, node Node, result any, indent int) error {
 		if ok {
 			for i, val := range r {
 				fc := formatNode.Formats[i]
-				typeName := formatCodeTypeName[fc.Code]
+				typeName := formatCodeRegistry[fc.Code].typeName
 				hexStr := formatHex(val)
 				valStr := formatValue(val)
 				name := fmt.Sprintf("%s%d", indentStr, i)
