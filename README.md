@@ -1,5 +1,10 @@
 # bq
 
+[![CI](https://github.com/cmj0121/bq/actions/workflows/ci.yml/badge.svg)](https://github.com/cmj0121/bq/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/cmj0121/bq/branch/main/graph/badge.svg)](https://codecov.io/gh/cmj0121/bq)
+[![Go Report Card](https://goreportcard.com/badge/github.com/cmj0121/bq)](https://goreportcard.com/report/github.com/cmj0121/bq)
+[![Release](https://img.shields.io/github/v/release/cmj0121/bq)](https://github.com/cmj0121/bq/releases/latest)
+
 > binary query and modification tool
 
 **bq** is the lightweight and portable command-line tool for binary query and modification tool.
